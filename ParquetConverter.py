@@ -1,54 +1,78 @@
+#!/usr/bin/env python
+# coding: utf-8
+# @Time    : 2019/10/08 20:40
+# @Author  : nszysiak
+# @Site    :
+# @File    : ParquetConverter.py
+# @Software: Atom
 from pyspark.sql import SparkSession, SQLContext
-from pyspark.sql.types import StructType, StructField, DateType, StringType, IntegerType
+from pyspark.sql.types import *
 from pyspark.conf import SparkConf
 from pyspark.context import SparkContext
-
-source_file_path = "C:/Users/Norbert Szysiak/Desktop/Consumer_Complaints.csv"
-json_broad_file_name = 'AmericanStatesAbb.json'
-
-spark_conf = SparkConf()
-
-spark = SparkSession.builder \
-        .master("local[*]") \
-        .appName("ParquetConverter") \
-        .config(conf=spark_conf) \
-        .getOrCreate()
-
-spark.sparkContext.setLogLevel('ERROR')
-
-schema = StructType([
-            StructField("RECEIVED_DATE", StringType(), True),
-            StructField("PRODUCT", StringType(), True),
-            StructField("SUBPRODUCT", StringType(), True),
-            StructField("ISSUE", StringType(), True),
-            StructField("SUBISSUE", StringType(), True),
-            StructField("CONSUMER_COMPLAINT_NARRATIVE", StringType(), True),
-            StructField("COMPANY_PUBLIC_RESPONE", StringType(), True),
-            StructField("COMPANY_NAME", StringType(), True),
-            StructField("STATE", StringType(), True),
-            StructField("ZIP_CODE", IntegerType(), True),
-            StructField("TAGS", StringType(), True),
-            StructField("IS_CONSUMER_CONSENT", StringType(), True),
-            StructField("SUBMITTED_VIA", StringType(), True),
-            StructField("SENT_DATE", StringType(), True),
-            StructField("COMPANY_RESPONSE_TO_CONSUMENT", StringType(), True),
-            StructField("IS_TIMELY_RESPONSE", StringType(), True),
-            StructField("IS_CONSUMER_DISPUTED", StringType(), True),
-            StructField("COMPLAINT_ID", IntegerType(), True),
-            ])
-
-df =   spark.read \
-         .format("csv") \
-         .option("header", "true") \
-         .option("delimiter", ",") \
-         .schema(schema) \
-         .option("nullValue", "null") \
-         .option("mode", "DROPMALFORMED") \
-         .load(source_file_path)
-
-broadcasted_var =   spark.read.json(json_broad_file_name)
+from pyspark.sql.functions import *
+from pyspark import SparkFiles
 
 
-broadcasted_var.show()
-#print(type(df))
-# df.printSchema()
+SOURCE_FILE_PATH = "C:/Users/Norbert Szysiak/Desktop/Consumer_Complaints.csv"
+AME_STATES = 'AmericanStatesAbb.json'
+PARQUET_DIR_MAME = "preprocessed_complaints"
+
+def main():
+
+    spark_conf = SparkConf()
+
+    spark_session = SparkSession.builder \
+    .master("local[*]") \
+    .appName("ParquetConverter") \
+    .config(conf=spark_conf) \
+    .getOrCreate()
+
+    spark_session.sparkContext.setLogLevel('ERROR')
+
+    customed_schema = StructType([
+                    StructField("ReceivedDate", StringType(), True),
+                    StructField("Product", StringType(), True),
+                    StructField("Subproduct", StringType(), True),
+                    StructField("Issue", StringType(), True),
+                    StructField("Subissue", StringType(), True),
+                    StructField("ConsumerComplaintNarrative", StringType(), True),
+                    StructField("CompanyPublicResponse", StringType(), True),
+                    StructField("CompanyName", StringType(), True),
+                    StructField("State", StringType(), True),
+                    StructField("ZipCode", IntegerType(), True),
+                    StructField("Tags", StringType(), True),
+                    StructField("IsConsumerConsent", StringType(), True),
+                    StructField("SubmittedVia", StringType(), True),
+                    StructField("SentDate", StringType(), True),
+                    StructField("CompanyResponseToConsument", StringType(), True),
+                    StructField("IsTimelyResponse", StringType(), True),
+                    StructField("IsConsumerDisputed", StringType(), True),
+                    StructField("ComplaintId", IntegerType(), True),
+                    ])
+
+    complaint_df =   spark_session.read \
+                    .format("csv") \
+                    .option("header", "true") \
+                    .option("delimiter", ",") \
+                    .schema(customed_schema) \
+                    .option("nullValue", "null") \
+                    .option("mode", "DROPMALFORMED") \
+                    .load(SOURCE_FILE_PATH) \
+                    .alias("complaint_df")
+
+    states_df =   spark_session.read \
+                .json(AME_STATES, multiLine=True) \
+                .alias("states_df")
+
+    drop_list = ["state", "abbreviation"]
+
+    master_df = complaint_df.join(broadcast(states_df), col("complaint_df.state") == col("states_df.abbreviation"), 'left') \
+                .withColumn("RowNoIndex", monotonically_increasing_id()) \
+                .withColumnRenamed("name", "StateName") \
+                .drop(*drop_list) \
+                .select("RowNoIndex","complaint_df.*", "StateName")
+
+    master_df.coalesce(1).write.format("csv").mode("append").save(PARQUET_DIR_MAME)
+
+if __name__ == '__main__':
+        main()
