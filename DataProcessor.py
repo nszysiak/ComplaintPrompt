@@ -13,4 +13,5 @@ from pyspark.sql.functions import *
 from pyspark import SparkFiles
 
 class CleanerUp(object):
-
+    def __init__():
+        pass
