@@ -27,7 +27,7 @@ def main():
     .config(conf=spark_conf) \
     .getOrCreate()
 
-    spark_session.sparkContext.setLogLevel('ERROR')
+    spark_session.sparkContext.setLogLevel('WARN')
 
     customed_schema = StructType([
                     StructField("ReceivedDate", StringType(), True),
@@ -72,7 +72,17 @@ def main():
                 .drop(*drop_list) \
                 .select("RowNoIndex","complaint_df.*", "StateName")
 
-    master_df.coalesce(1).write.format("csv").mode("append").save(PARQUET_DIR_MAME)
+   # keep marksuccessfuljobs Hadoop's property as a trigger (_SUCCESS file) to subsquent processing
+
+    master_df.coalesce(1).write \
+                        .format("parquet") \
+                        .mode("append") \
+                        .option("header","true") \
+                        .option("mapreduce.fileoutputcommitter.marksuccessfuljobs","true") \
+                        .save(PARQUET_DIR_MAME)
+
+
+    spark_session.stop()
 
 if __name__ == '__main__':
         main()
