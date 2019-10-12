@@ -45,6 +45,7 @@ if file_ex.is_dir() and succ_file.is_file():
                     .load(parq_wildcard_loc) \
                     .alias("init_df")
 
+<<<<<<< HEAD
 
     feat_cols = init_df.columns
 
@@ -60,6 +61,23 @@ if file_ex.is_dir() and succ_file.is_file():
 
     #checks
 
+=======
+    init_df.head()
+    """feat_cols = init_df.columns
+
+    vec_assembler = VectorAssembler(inputCols=feat_cols, outputCol='features')
+
+    fd = vec_assembler.transform(init_df).cache()
+
+    scaler = StandardScaler(inputCol="features", outputCol="scaledFeatures", withStd=True, withMean=False)
+
+    scaler_model = scaler.fit(fd)
+
+    clstr_final_dt = scaler_model.transform(fd)
+
+    #checks
+
+>>>>>>> da4936a3001664cff1defb9e2477d344cf211bba
     kmeans4 = KMeans(featuresCol="scaledFeatures", k=4)
     kmeans3 = KMeans(featuresCol="scaledFeatures", k=3)
     kmeans2 = KMeans(featuresCol="scaledFeatures", k=2)
@@ -72,8 +90,12 @@ if file_ex.is_dir() and succ_file.is_file():
 
     wssse_4 = model_k4.computeCost(clstr_final_dt)
     wssse_3 = model_k3.computeCost(clstr_final_dt)
+<<<<<<< HEAD
     wssse_2 = model_k2.computeCost(clstr_final_dt)
 
     model_k2.clusterCenters.forEach(println)
     model_k3.clusterCenters.forEach(println)
     model_k4.clusterCenters.forEach(println)
+=======
+    wssse_2 = model_k2.computeCost(clstr_final_dt)"""
+>>>>>>> da4936a3001664cff1defb9e2477d344cf211bba
