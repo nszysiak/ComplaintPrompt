@@ -14,52 +14,66 @@ from pyspark.ml.clustering import KMeans
 from pyspark.ml.linalg import Vector
 from pyspark.ml.feature import VectorAssembler, StandardScaler
 import numpy as np
+from pathlib import Path, PurePath
 
 
 #def clean_up(line):
+files_dir = "preprocessed_complaints"
 parq_wildcard_loc = "preprocessed_complaints\part-*.parquet"
+succ_file_path = "preprocessed_complaints\_SUCCESS"
 
-spark_conf = SparkConf()
+succ_file = Path(succ_file_path)
+file_ex = Path(files_dir)
 
-spark_session = SparkSession.builder \
-.master("local[*]") \
-.appName("PreliminarySieve") \
-.config(conf=spark_conf) \
-.getOrCreate()
 
-spark_session.sparkContext.setLogLevel('WARN')
+if file_ex.is_dir() and succ_file.is_file():
 
-init_df    =   spark_session.read \
-                .format("parquet") \
-                .option("header", "true") \
-                .option("inferSchema", "true") \
-                .load(parq_wildcard_loc) \
-                .alias("init_df")
+    spark_conf = SparkConf()
 
-feat_cols = init_df.columns
+    spark_session = SparkSession.builder \
+    .master("local[*]") \
+    .appName("PreliminarySieve") \
+    .config(conf=spark_conf) \
+    .getOrCreate()
 
-vec_assembler = VectorAssembler(inputCols=feat_cols, outputCol='features')
+    spark_session.sparkContext.setLogLevel('WARN')
 
-fd = vec_assembler.transform(init_df)
+    init_df    =   spark_session.read \
+                    .format("parquet") \
+                    .option("header", "true") \
+                    .option("inferSchema", "true") \
+                    .load(parq_wildcard_loc) \
+                    .alias("init_df")
 
-scaler = StandardScaler(inputCol="features", outputCol="scaledFeatures", withStd=True, withMean=False)
 
-scaler_model = scaler.fit(fd)
+    feat_cols = init_df.columns
 
-clstr_final_dt = scaler_model.transform(fd)
+    vec_assembler = VectorAssembler(inputCols=feat_cols, outputCol='features')
 
-#checks
+    fd = vec_assembler.transform(init_df).cache()
 
-kmeans4 = KMeans(featuresCol="scaledFeatures", k=4)
-kmeans3 = KMeans(featuresCol="scaledFeatures", k=3)
-kmeans2 = KMeans(featuresCol="scaledFeatures", k=2)
+    scaler = StandardScaler(inputCol="features", outputCol="scaledFeatures", withStd=True, withMean=False)
 
-# do a model
+    scaler_model = scaler.fit(fd)
 
-model_k4 = kmeans4.fit(clstr_final_dt)
-model_k3 = kmeans3.fit(clstr_final_dt)
-model_k2 = kmeans2.fit(clstr_final_dt)
+    clstr_final_dt = scaler_model.transform(fd)
 
-wssse_4 = model_k4.computeCost(clstr_final_dt)
-wssse_3 = model_k3.computeCost(clstr_final_dt)
-wssse_2 = model_k2.computeCost(clstr_final_dt)
+    #checks
+
+    kmeans4 = KMeans(featuresCol="scaledFeatures", k=4)
+    kmeans3 = KMeans(featuresCol="scaledFeatures", k=3)
+    kmeans2 = KMeans(featuresCol="scaledFeatures", k=2)
+
+    # do a model
+
+    model_k4 = kmeans4.fit(clstr_final_dt)
+    model_k3 = kmeans3.fit(clstr_final_dt)
+    model_k2 = kmeans2.fit(clstr_final_dt)
+
+    wssse_4 = model_k4.computeCost(clstr_final_dt)
+    wssse_3 = model_k3.computeCost(clstr_final_dt)
+    wssse_2 = model_k2.computeCost(clstr_final_dt)
+
+    model_k2.clusterCenters.forEach(println)
+    model_k3.clusterCenters.forEach(println)
+    model_k4.clusterCenters.forEach(println)
