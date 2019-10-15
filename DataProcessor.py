@@ -1,11 +1,12 @@
 #!/usr/bin/env python
 # coding: utf-8
-# @Time    : 2019/10/08 20:40
+# @Time    : 2019/10/15 23:00
 # @Author  : nszysiak
 # @Site    :
 # @File    : DataProcessor.py
 # @Software: Atom
 from pyspark.sql import SparkSession, SQLContext
+from pyspark.sql.column import Column as col
 from pyspark.sql.types import *
 from pyspark.conf import SparkConf
 from pyspark.context import SparkContext
@@ -13,11 +14,13 @@ from pyspark.sql.functions import *
 from pyspark.ml.clustering import KMeans
 from pyspark.ml.linalg import Vector
 from pyspark.ml.feature import VectorAssembler, StandardScaler
+from pyspark.sql.functions import udf
 import numpy as np
-from pathlib import Path, PurePath
+from pathlib import Path
+import re
 
 
-#def clean_up(line):
+
 files_dir = "preprocessed_complaints"
 parq_wildcard_loc = "preprocessed_complaints\part-*.parquet"
 succ_file_path = "preprocessed_complaints\_SUCCESS"
@@ -26,76 +29,85 @@ succ_file = Path(succ_file_path)
 file_ex = Path(files_dir)
 
 
-if file_ex.is_dir() and succ_file.is_file():
+def cleanse_field(field):
+    pattern = r'[^A-Za-z0-9 ]+'
+    if field is not None:
+        return re.sub(pattern,'',field.lower())
+    else:
+        return None
 
-    spark_conf = SparkConf()
+def main():
 
-    spark_session = SparkSession.builder \
-    .master("local[*]") \
-    .appName("PreliminarySieve") \
-    .config(conf=spark_conf) \
-    .getOrCreate()
+    if file_ex.is_dir() and succ_file.is_file():
 
-    spark_session.sparkContext.setLogLevel('WARN')
+        spark_conf = SparkConf()
 
-    init_df    =   spark_session.read \
-                    .format("parquet") \
-                    .option("header", "true") \
-                    .option("inferSchema", "true") \
-                    .load(parq_wildcard_loc) \
-                    .alias("init_df")
+        spark_session = SparkSession.builder \
+        .master("local[*]") \
+        .appName("PreliminarySieve") \
+        .config(conf=spark_conf) \
+        .getOrCreate()
 
-<<<<<<< HEAD
+        spark_session.sparkContext.setLogLevel('WARN')
 
-    feat_cols = init_df.columns
+        init_df    =   spark_session.read \
+                        .format("parquet") \
+                        .option("header", "true") \
+                        .option("inferSchema", "true") \
+                        .load(parq_wildcard_loc) \
+                        .alias("init_df")
 
-    vec_assembler = VectorAssembler(inputCols=feat_cols, outputCol='features')
 
-    fd = vec_assembler.transform(init_df).cache()
+        udf_cleansed_field = udf(cleanse_field, StringType())
 
-    scaler = StandardScaler(inputCol="features", outputCol="scaledFeatures", withStd=True, withMean=False)
+        datatp_chg =  udf (lambda x: datetime.strptime(x, '%m/%d/%Y'), DateType())
 
-    scaler_model = scaler.fit(fd)
+        cleansed_init_df = init_df.withColumn('Issue', udf_cleansed_field(init_df['Issue'])) \
+                           .withColumn('CompanyResponseToConsument', udf_cleansed_field(init_df['CompanyResponseToConsument'])) \
+                           .withColumn('ReceivedDate', datatp_chg(init_df['ReceivedDate']))
 
-    clstr_final_dt = scaler_model.transform(fd)
+        filtered_df = cleansed_init_df.filter(cleansed_init_df['CompanyResponseToConsument'].rlike('close')) \
+                      .filter(cleansed_init_df['StateName'] == 'California')
 
-    #checks
+        filtered_df.createOrReplaceTempView("complaints")
 
-=======
-    init_df.head()
-    """feat_cols = init_df.columns
+        final_df = spark_session.sql("SELECT RowNoIndex, ComplaintId, ReceivedDate, Product, Subproduct, Issue, CompanyResponseToConsument \
+                                     FROM complaints")
 
-    vec_assembler = VectorAssembler(inputCols=feat_cols, outputCol='features')
+        final_df.show(20)
 
-    fd = vec_assembler.transform(init_df).cache()
 
-    scaler = StandardScaler(inputCol="features", outputCol="scaledFeatures", withStd=True, withMean=False)
+        #feat_cols = init_df.columns
 
-    scaler_model = scaler.fit(fd)
+        #vec_assembler = VectorAssembler(inputCols=feat_cols, outputCol='features')
 
-    clstr_final_dt = scaler_model.transform(fd)
+        #fd = vec_assembler.transform(init_df).cache()
 
-    #checks
+        #scaler = StandardScaler(inputCol="features", outputCol="scaledFeatures", withStd=True, withMean=False)
 
->>>>>>> da4936a3001664cff1defb9e2477d344cf211bba
-    kmeans4 = KMeans(featuresCol="scaledFeatures", k=4)
-    kmeans3 = KMeans(featuresCol="scaledFeatures", k=3)
-    kmeans2 = KMeans(featuresCol="scaledFeatures", k=2)
+        #scaler_model = scaler.fit(fd)
 
-    # do a model
+        #clstr_final_dt = scaler_model.transform(fd)
 
-    model_k4 = kmeans4.fit(clstr_final_dt)
-    model_k3 = kmeans3.fit(clstr_final_dt)
-    model_k2 = kmeans2.fit(clstr_final_dt)
+        #checks
 
-    wssse_4 = model_k4.computeCost(clstr_final_dt)
-    wssse_3 = model_k3.computeCost(clstr_final_dt)
-<<<<<<< HEAD
-    wssse_2 = model_k2.computeCost(clstr_final_dt)
+        #kmeans4 = KMeans(featuresCol="scaledFeatures", k=4)
+        #kmeans3 = KMeans(featuresCol="scaledFeatures", k=3)
+        #kmeans2 = KMeans(featuresCol="scaledFeatures", k=2)
 
-    model_k2.clusterCenters.forEach(println)
-    model_k3.clusterCenters.forEach(println)
-    model_k4.clusterCenters.forEach(println)
-=======
-    wssse_2 = model_k2.computeCost(clstr_final_dt)"""
->>>>>>> da4936a3001664cff1defb9e2477d344cf211bba
+        # do a model
+
+        #model_k4 = kmeans4.fit(clstr_final_dt)
+        #model_k3 = kmeans3.fit(clstr_final_dt)
+        #model_k2 = kmeans2.fit(clstr_final_dt)
+
+        #wssse_4 = model_k4.computeCost(clstr_final_dt)
+        #wssse_3 = model_k3.computeCost(clstr_final_dt)
+        #wssse_2 = model_k2.computeCost(clstr_final_dt)
+
+        #model_k2.clusterCenters.forEach(println)
+        #model_k3.clusterCenters.forEach(println)
+        #model_k4.clusterCenters.forEach(println)
+
+if __name__ == '__main__':
+        main()

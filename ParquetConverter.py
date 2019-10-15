@@ -73,7 +73,7 @@ def main():
                 .select("RowNoIndex","complaint_df.*", "StateName")
 
    # keep marksuccessfuljobs Hadoop's property as a trigger (_SUCCESS file) to subsquent processing
-
+    #master_df.show(10)
     master_df.coalesce(1).write \
                         .format("parquet") \
                         .mode("append") \
