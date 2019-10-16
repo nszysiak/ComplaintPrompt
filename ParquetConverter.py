@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # coding: utf-8
-# @Time    : 2019/10/08 20:40
+# @Time    : 2019/10/16 20:40
 # @Author  : nszysiak
 # @Site    :
 # @File    : ParquetConverter.py
@@ -73,7 +73,7 @@ def main():
                 .select("RowNoIndex","complaint_df.*", "StateName")
 
    # keep marksuccessfuljobs Hadoop's property as a trigger (_SUCCESS file) to subsquent processing
-    #master_df.show(10)
+
     master_df.coalesce(1).write \
                         .format("parquet") \
                         .mode("append") \

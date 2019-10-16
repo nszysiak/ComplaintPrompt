@@ -1,12 +1,12 @@
 #!/usr/bin/env python
 # coding: utf-8
-# @Time    : 2019/10/15 23:00
+# @Time    : 2019/10/16 23:00
 # @Author  : nszysiak
 # @Site    :
 # @File    : DataProcessor.py
 # @Software: Atom
 from pyspark.sql import SparkSession, SQLContext
-from pyspark.sql.column import Column as col
+from pyspark.sql.column import Column
 from pyspark.sql.types import *
 from pyspark.conf import SparkConf
 from pyspark.context import SparkContext
@@ -18,6 +18,7 @@ from pyspark.sql.functions import udf
 import numpy as np
 from pathlib import Path
 import re
+from datetime import datetime
 
 
 
@@ -60,19 +61,21 @@ def main():
 
         udf_cleansed_field = udf(cleanse_field, StringType())
 
-        datatp_chg =  udf (lambda x: datetime.strptime(x, '%m/%d/%Y'), DateType())
+        data_chg =  udf(lambda x: datetime.strptime(x, '%m/%d/%Y'), DateType())
 
         cleansed_init_df = init_df.withColumn('Issue', udf_cleansed_field(init_df['Issue'])) \
-                           .withColumn('CompanyResponseToConsument', udf_cleansed_field(init_df['CompanyResponseToConsument'])) \
-                           .withColumn('ReceivedDate', datatp_chg(init_df['ReceivedDate']))
+                           .withColumn('CompanyResponse', udf_cleansed_field(init_df['CompanyResponseToConsument'])) \
+                           .drop('CompanyResponseToConsument') \
+                           .withColumn('ReceivedDate', data_chg(init_df['ReceivedDate']))
 
-        filtered_df = cleansed_init_df.filter(cleansed_init_df['CompanyResponseToConsument'].rlike('close')) \
-                      .filter(cleansed_init_df['StateName'] == 'California')
+        filtered_df = cleansed_init_df.filter(cleansed_init_df['CompanyResponse'].rlike('close'))
 
-        filtered_df.createOrReplaceTempView("complaints")
+        final_df = filtered_df.select('RowNoIndex', 'ComplaintId', 'ReceivedDate', 'Product', 'Subproduct', 'Issue', 'CompanyResponse') \
+                              .filter(year(filtered_df['ReceivedDate']).between(2013, 2015)) \
+                              .filter(filtered_df['Issue'].isNotNull()) \
+                              .filter(filtered_df['Product'].isNotNull()) \
+                              .orderBy(filtered_df['ReceivedDate'])
 
-        final_df = spark_session.sql("SELECT RowNoIndex, ComplaintId, ReceivedDate, Product, Subproduct, Issue, CompanyResponseToConsument \
-                                     FROM complaints")
 
         final_df.show(20)
 
