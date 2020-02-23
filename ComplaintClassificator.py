@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 # coding: utf-8
 # @Author  : nszysiak
-# @File    : ParquetConverter.py
+# @File    : ComplaintClassificator.py
 # @Software: PyCharm
 
-from datetime import datetime
+from datetime import datetime as dt, timedelta
 import re
 
 from pyspark.sql import SparkSession, SQLContext
@@ -12,9 +12,13 @@ from pyspark.sql.types import *
 from pyspark.conf import SparkConf
 from pyspark.sql.functions import *
 from pyspark.sql.functions import udf
+from pyspark.ml.feature import HashingTF, IDF, Tokenizer
 
 SOURCE_FILE_PATH = "C:/Users/Norbert Szysiak/Desktop/Consumer_Complaints.csv"
 AME_STATES = 'AmericanStatesAbb.json'
+
+"""Classify client complaints using both SparkSQL
+ and SparkML APIs"""
 
 
 def cleanse_field(field):
@@ -26,14 +30,20 @@ def cleanse_field(field):
 
 
 def main():
+    # instantiate SparkConf
     spark_conf = SparkConf()
 
+    # build SparkSession with already instantiated SparkConf (spark_conf)
     spark_session = SparkSession.builder \
         .master("local[*]") \
-        .appName("ParquetConverter") \
+        .appName("ComplaintClassificator") \
         .config(conf=spark_conf) \
         .getOrCreate()
 
+    # time of start
+    start_time = dt.now()
+
+    # set log level to 'WARN' - reject 'INFO' level logs
     spark_session.sparkContext.setLogLevel('WARN')
 
     # create customized schema as a StructType of StructField(s)
@@ -69,15 +79,16 @@ def main():
         .load(SOURCE_FILE_PATH) \
         .alias("complaint_df")
 
-    # print schema of a complaint_df DataFrame abstraction
-    print(complaint_df.schema)
+    # print statistics of a complaint_df DataFrame abstraction
+    print("complaint_df has %d records, %d columns." % (complaint_df.count(), len(complaint_df.columns)))
+    print("Schema: %s" % complaint_df.columns)
 
     # some clean-up activities start right here
     # register cleanse_files function as an UDF (UserDefinedFunction)
     udf_cleansed_field = udf(cleanse_field, StringType())
 
-    # provide a lambda function to format date-type field
-    change_data_format = udf(lambda x: datetime.strptime(x, '%m/%d/%Y'), DateType())
+    # provide a lambda function to format date-type field to 'YYYY-MM-DD' pattern
+    change_data_format = udf(lambda x: dt.strptime(x, '%m/%d/%Y'), DateType())
 
     # apply predefined udf_cleansed_field function to "Issue" field in order to remove special
     # signs and modify letters to lower case, apply udf_cleansed_field to "CompanyResponseToConsument"
@@ -88,65 +99,81 @@ def main():
         .drop('CompanyResponseToConsument') \
         .withColumn('ReceivedDate', change_data_format(complaint_df['ReceivedDate']))
 
+    # print statistics of a cleansed_init_df DataFrame abstraction
+    print("cleansed_init_df has %d records, %d columns." % (cleansed_init_df.count(), len(cleansed_init_df.columns)))
+    print("Schema: %s" % cleansed_init_df.columns)
+
+    # apply filter on 'CompanyResponse' field to show only closed complaints
     filtered_response = cleansed_init_df.filter(cleansed_init_df['CompanyResponse'].rlike('close'))
 
-    final_complaint_df = filtered_response.select('ComplaintId', 'ReceivedDate', "State",
-                                  'Product', 'Subproduct', 'Issue', 'CompanyResponse') \
-        .filter(filtered_response['Issue'].isNotNull()) \
+    # print statistics of a filtered_response DataFrame abstraction
+    print("filtered_response has %d records, %d columns." % (filtered_response.count(), len(filtered_response.columns)))
+    print("Schema: %s" % filtered_response.columns)
+
+    # select a few needed fields, check if some of these fields are not null, so that the data
+    # is consistent in further steps of processing, order by 'ReceivedDate' in case of a look-up
+    final_complaints = filtered_response.select('ComplaintId', 'ReceivedDate', 'State',
+                                                'Product', 'ConsumerComplaintNarrative', 'Issue') \
+        .filter(filtered_response['ConsumerComplaintNarrative'].isNotNull()) \
         .filter(filtered_response['Product'].isNotNull()) \
         .orderBy(filtered_response['ReceivedDate'])
 
-    #possible date filtering
+    # print statistics of a final_complaints DataFrame abstraction
+    print("final_complaints has %d records, %d columns." % (final_complaints.count(), len(final_complaints.columns)))
+    print("Schema: %s" % final_complaints.columns)
+
+    # possible filtering on 'ReceivedDate' field for the filtered_response DataFrame abstraction
     # .filter(year(filtered_response['ReceivedDate']).between(2013, 2015)) \
 
+    # read states json provider as a states_df DataFrame abstraction
     states_df = spark_session.read \
         .json(AME_STATES, multiLine=True) \
         .alias("states_df")
 
-    print(states_df.schema)
+    # print statistics of a states_df DataFrame abstraction
+    print("states_df has %d records, %d columns." % (states_df.count(), len(states_df.columns)))
+    print("Schema: %s" % states_df.columns)
 
+    # list of fields to drop (not needed for the further processing)
     drop_list = ["state", "abbreviation"]
 
-    master_df = final_complaint_df.join(broadcast(states_df), col("complaint_df.State") == col("states_df.abbreviation"),
-                                  'left') \
+    # left join of final_complaints with states_df on "complaint_df.State" == "states_df.abbreviation"
+    # field with explicitly broadcasted states_df DataFrame abstraction in order to reduced costs
+    # of communication (keep a read-only dataset cached on each node)
+    master_df = final_complaints.join(broadcast(states_df),
+                                      col("complaint_df.State") == col("states_df.abbreviation"),
+                                      'left') \
         .withColumn("RowNoIndex", monotonically_increasing_id()) \
+        .withColumnRenamed("ConsumerComplaintNarrative", "ConsumerComplaint") \
         .withColumnRenamed("name", "StateName") \
         .drop(*drop_list) \
-        .select("RowNoIndex", "complaint_df.*", "StateName")
+        .select("Product", "ConsumerComplaint")
+
+    # possible filtering on 'State' field for the states_df DataFrame abstraction
+    # .where(states_df['name'].contains('California')) \
+
+    # print statistics of a master_df DataFrame abstraction
+    print("master_df has %d records, %d columns." % (master_df.count(), len(master_df.columns)))
+    print("Schema: %s" % master_df.columns)
 
     master_df.show(20)
 
-    # feat_cols = init_df.columns
+    tokenizer = Tokenizer(inputCol="ConsumerComplaint", outputCol="Words")
+    words_data = tokenizer.transform(master_df)
 
-    # vec_assembler = VectorAssembler(inputCols=feat_cols, outputCol='features')
+    # each row as a separate document in terms of TF-IDF
+    hashing_tf = HashingTF(inputCol="Words", outputCol="RawFeatures", numFeatures=20)
+    featurized_data = hashing_tf.transform(words_data)
 
-    # fd = vec_assembler.transform(init_df).cache()
+    idf = IDF(inputCol="RawFeatures", outputCol="Features")
+    idfModel = idf.fit(featurized_data)
+    rescaled_data = idfModel.transform(featurized_data)
 
-    # scaler = StandardScaler(inputCol="features", outputCol="scaledFeatures", withStd=True, withMean=False)
+    rescaled_data.select("Product", "Features").show()
 
-    # scaler_model = scaler.fit(fd)
-
-    # clstr_final_dt = scaler_model.transform(fd)
-
-    # checks
-
-    # kmeans4 = KMeans(featuresCol="scaledFeatures", k=4)
-    # kmeans3 = KMeans(featuresCol="scaledFeatures", k=3)
-    # kmeans2 = KMeans(featuresCol="scaledFeatures", k=2)
-
-    # do a model
-
-    # model_k4 = kmeans4.fit(clstr_final_dt)
-    # model_k3 = kmeans3.fit(clstr_final_dt)
-    # model_k2 = kmeans2.fit(clstr_final_dt)
-
-    # wssse_4 = model_k4.computeCost(clstr_final_dt)
-    # wssse_3 = model_k3.computeCost(clstr_final_dt)
-    # wssse_2 = model_k2.computeCost(clstr_final_dt)
-
-    # model_k2.clusterCenters.forEach(println)
-    # model_k3.clusterCenters.forEach(println)
-    # model_k4.clusterCenters.forEach(println)
+    # time of end
+    end_time = dt.now()
+    print("Elapsed time: %s" % str(end_time - start_time))
 
     spark_session.stop()
 
