@@ -100,5 +100,9 @@ venv.bak/
 # mkdocs documentation
 /site
 
+# Inteliji directories
+.idea
+.idea/
+
 # mypy
 .mypy_cache/

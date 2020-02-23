@@ -4,15 +4,15 @@
 # @File    : ComplaintClassificator.py
 # @Software: PyCharm
 
-from datetime import datetime as dt, timedelta
+from datetime import datetime as dt
 import re
 
-from pyspark.sql import SparkSession, SQLContext
+from pyspark.sql import SparkSession
 from pyspark.sql.types import *
 from pyspark.conf import SparkConf
 from pyspark.sql.functions import *
 from pyspark.sql.functions import udf
-from pyspark.ml.feature import HashingTF, IDF, Tokenizer
+from pyspark.ml.feature import HashingTF, IDF, Tokenizer, StopWordsRemover
 
 SOURCE_FILE_PATH = "C:/Users/Norbert Szysiak/Desktop/Consumer_Complaints.csv"
 AME_STATES = 'AmericanStatesAbb.json'
@@ -35,13 +35,13 @@ def main():
 
     # build SparkSession with already instantiated SparkConf (spark_conf)
     spark_session = SparkSession.builder \
-        .master("local[*]") \
+        .master("local[2]") \
         .appName("ComplaintClassificator") \
         .config(conf=spark_conf) \
         .getOrCreate()
 
     # time of start
-    start_time = dt.now()
+    start_timestamp = dt.now()
 
     # set log level to 'WARN' - reject 'INFO' level logs
     spark_session.sparkContext.setLogLevel('WARN')
@@ -94,7 +94,7 @@ def main():
     # signs and modify letters to lower case, apply udf_cleansed_field to "CompanyResponseToConsument"
     # field and rename this field to 'CompanyResponse', drop field 'CompanyResponseToConsument',
     # change date format in 'ReceivedDate' field
-    cleansed_init_df = complaint_df.withColumn('Issue', udf_cleansed_field(complaint_df['Issue'])) \
+    cleansed_init_df = complaint_df.withColumn('Issue', udf_cleansed_field(complaint_df["ConsumerComplaintNarrative"])) \
         .withColumn('CompanyResponse', udf_cleansed_field(complaint_df['CompanyResponseToConsument'])) \
         .drop('CompanyResponseToConsument') \
         .withColumn('ReceivedDate', change_data_format(complaint_df['ReceivedDate']))
@@ -140,30 +140,52 @@ def main():
     # left join of final_complaints with states_df on "complaint_df.State" == "states_df.abbreviation"
     # field with explicitly broadcasted states_df DataFrame abstraction in order to reduced costs
     # of communication (keep a read-only dataset cached on each node)
-    master_df = final_complaints.join(broadcast(states_df),
-                                      col("complaint_df.State") == col("states_df.abbreviation"),
-                                      'left') \
-        .withColumn("RowNoIndex", monotonically_increasing_id()) \
-        .withColumnRenamed("ConsumerComplaintNarrative", "ConsumerComplaint") \
-        .withColumnRenamed("name", "StateName") \
-        .drop(*drop_list) \
-        .select("Product", "ConsumerComplaint")
+    # TODO: rename duplicated categories i.e. Poduct labels in order to prevent from decreasing a model performance
+    joined_df = final_complaints.join(broadcast(states_df), col("complaint_df.State") == col("states_df.abbreviation"), "left") \
+                                .withColumnRenamed("ConsumerComplaintNarrative", "ConsumerComplaint") \
+                                .withColumn("RowNoIndex", monotonically_increasing_id()) \
+                                .drop(*drop_list) \
+                                .select("Product", "ConsumerComplaint")
 
     # possible filtering on 'State' field for the states_df DataFrame abstraction
-    # .where(states_df['name'].contains('California')) \
+    # .where(states_df['name'].contains('California'))
 
-    # print statistics of a master_df DataFrame abstraction
-    print("master_df has %d records, %d columns." % (master_df.count(), len(master_df.columns)))
-    print("Schema: %s" % master_df.columns)
+    # print statistics of a joined_df DataFrame abstraction
+    print("master_df has %d records, %d columns." % (joined_df.count(), len(joined_df.columns)))
+    print("Schema: %s" % joined_df.columns)
 
-    master_df.show(20)
+    # check unique labels of Product attribute before replace
+    joined_df.select("Product").distinct().show()
 
+    renamed_df = joined_df.withColumn("Product", regexp_replace("Product", "Credit reporting, credit repair services, or other personal consumer reports", "Credit reporting, repair, or other")) \
+                          .withColumn("Product", regexp_replace("Product", "Virtual currency", "Money transfer, virtual currency, or money service")) \
+                          .withColumn("Product", regexp_replace("Product", "Money transfer", "Money transfer, virtual currency, or money service")) \
+                          .withColumn("Product", regexp_replace("Product", "Payday loan", "Payday loan, title loan, or personal loan")) \
+                          .withColumn("Product", regexp_replace("Product", "Credit reporting", "Credit reporting, repair, or other")) \
+                          .withColumn("Product", regexp_replace("Product", "Prepaid card", "Credit card or prepaid card")) \
+                          .withColumn("Product", regexp_replace("Product", "Credit card", "Credit card or prepaid card"))
+
+    # check unique labels of Product attribute after replace
+    renamed_df.select("Product").distinct().show()
+
+    print("Starting feature extraction...")
+
+    # tokenize consumer complaints sentences
     tokenizer = Tokenizer(inputCol="ConsumerComplaint", outputCol="Words")
-    words_data = tokenizer.transform(master_df)
+    words_data = tokenizer.transform(renamed_df)
+
+    # remove stop words
+    remover = StopWordsRemover(inputCol="Words", outputCol="FilteredWords")
+    print("Trying to remove following stop words: %s" % remover.getStopWords())
+    filtered_words = remover.transform(words_data)
+    filtered_words.select("FilteredWords").show(10)
 
     # each row as a separate document in terms of TF-IDF
-    hashing_tf = HashingTF(inputCol="Words", outputCol="RawFeatures", numFeatures=20)
-    featurized_data = hashing_tf.transform(words_data)
+    # token hashing with hash function MurmurHash3_x86_32
+    # TODO: optimize num_features amount while evaluating a ML model
+    num_features = 512
+    hashing_tf = HashingTF(inputCol="FilteredWords", outputCol="RawFeatures", numFeatures=num_features)
+    featurized_data = hashing_tf.transform(filtered_words)
 
     idf = IDF(inputCol="RawFeatures", outputCol="Features")
     idfModel = idf.fit(featurized_data)
@@ -172,9 +194,12 @@ def main():
     rescaled_data.select("Product", "Features").show()
 
     # time of end
-    end_time = dt.now()
-    print("Elapsed time: %s" % str(end_time - start_time))
+    end_timestamp = dt.now()
 
+    # print elapsed time
+    print("Elapsed time: %s" % str(end_timestamp - start_timestamp))
+
+    # stop SparkSession
     spark_session.stop()
 
 
