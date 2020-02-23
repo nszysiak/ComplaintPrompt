@@ -12,7 +12,11 @@ from pyspark.sql.types import *
 from pyspark.conf import SparkConf
 from pyspark.sql.functions import *
 from pyspark.sql.functions import udf
-from pyspark.ml.feature import HashingTF, IDF, Tokenizer, StopWordsRemover
+from pyspark.ml.feature import HashingTF, IDF, Tokenizer, StopWordsRemover, StringIndexer
+from pyspark.ml import Pipeline
+from pyspark.ml.classification import NaiveBayes
+from pyspark.ml.evaluation import MulticlassClassificationEvaluator
+
 
 SOURCE_FILE_PATH = "C:/Users/Norbert Szysiak/Desktop/Consumer_Complaints.csv"
 AME_STATES = 'AmericanStatesAbb.json'
@@ -81,7 +85,8 @@ def main():
 
     # print statistics of a complaint_df DataFrame abstraction
     print("complaint_df has %d records, %d columns." % (complaint_df.count(), len(complaint_df.columns)))
-    print("Schema: %s" % complaint_df.columns)
+    print("Schema: ")
+    complaint_df.printSchema()
 
     # some clean-up activities start right here
     # register cleanse_files function as an UDF (UserDefinedFunction)
@@ -90,7 +95,8 @@ def main():
     # provide a lambda function to format date-type field to 'YYYY-MM-DD' pattern
     change_data_format = udf(lambda x: dt.strptime(x, '%m/%d/%Y'), DateType())
 
-    # apply predefined udf_cleansed_field function to "Issue" field in order to remove special
+    # apply predefined udf_cleansed_field function to "ConsumerComplaintNarrative" as well as
+    # to "CompanyResponseToConsument" field in order to remove special
     # signs and modify letters to lower case, apply udf_cleansed_field to "CompanyResponseToConsument"
     # field and rename this field to 'CompanyResponse', drop field 'CompanyResponseToConsument',
     # change date format in 'ReceivedDate' field
@@ -101,14 +107,16 @@ def main():
 
     # print statistics of a cleansed_init_df DataFrame abstraction
     print("cleansed_init_df has %d records, %d columns." % (cleansed_init_df.count(), len(cleansed_init_df.columns)))
-    print("Schema: %s" % cleansed_init_df.columns)
+    print("Schema: ")
+    cleansed_init_df.printSchema()
 
     # apply filter on 'CompanyResponse' field to show only closed complaints
     filtered_response = cleansed_init_df.filter(cleansed_init_df['CompanyResponse'].rlike('close'))
 
     # print statistics of a filtered_response DataFrame abstraction
     print("filtered_response has %d records, %d columns." % (filtered_response.count(), len(filtered_response.columns)))
-    print("Schema: %s" % filtered_response.columns)
+    print("Schema: ")
+    filtered_response.printSchema()
 
     # select a few needed fields, check if some of these fields are not null, so that the data
     # is consistent in further steps of processing, order by 'ReceivedDate' in case of a look-up
@@ -120,7 +128,8 @@ def main():
 
     # print statistics of a final_complaints DataFrame abstraction
     print("final_complaints has %d records, %d columns." % (final_complaints.count(), len(final_complaints.columns)))
-    print("Schema: %s" % final_complaints.columns)
+    print("Schema: ")
+    final_complaints.printSchema()
 
     # possible filtering on 'ReceivedDate' field for the filtered_response DataFrame abstraction
     # .filter(year(filtered_response['ReceivedDate']).between(2013, 2015)) \
@@ -132,7 +141,8 @@ def main():
 
     # print statistics of a states_df DataFrame abstraction
     print("states_df has %d records, %d columns." % (states_df.count(), len(states_df.columns)))
-    print("Schema: %s" % states_df.columns)
+    print("Schema: ")
+    states_df.printSchema()
 
     # list of fields to drop (not needed for the further processing)
     drop_list = ["state", "abbreviation"]
@@ -140,7 +150,6 @@ def main():
     # left join of final_complaints with states_df on "complaint_df.State" == "states_df.abbreviation"
     # field with explicitly broadcasted states_df DataFrame abstraction in order to reduced costs
     # of communication (keep a read-only dataset cached on each node)
-    # TODO: rename duplicated categories i.e. Poduct labels in order to prevent from decreasing a model performance
     joined_df = final_complaints.join(broadcast(states_df), col("complaint_df.State") == col("states_df.abbreviation"), "left") \
                                 .withColumnRenamed("ConsumerComplaintNarrative", "ConsumerComplaint") \
                                 .withColumn("RowNoIndex", monotonically_increasing_id()) \
@@ -151,8 +160,9 @@ def main():
     # .where(states_df['name'].contains('California'))
 
     # print statistics of a joined_df DataFrame abstraction
-    print("master_df has %d records, %d columns." % (joined_df.count(), len(joined_df.columns)))
-    print("Schema: %s" % joined_df.columns)
+    print("joined_df has %d records, %d columns." % (joined_df.count(), len(joined_df.columns)))
+    print("Schema: ")
+    joined_df.printSchema()
 
     # check unique labels of Product attribute before replace
     joined_df.select("Product").distinct().show()
@@ -172,26 +182,42 @@ def main():
 
     # tokenize consumer complaints sentences
     tokenizer = Tokenizer(inputCol="ConsumerComplaint", outputCol="Words")
-    words_data = tokenizer.transform(renamed_df)
 
     # remove stop words
     remover = StopWordsRemover(inputCol="Words", outputCol="FilteredWords")
-    print("Trying to remove following stop words: %s" % remover.getStopWords())
-    filtered_words = remover.transform(words_data)
-    filtered_words.select("FilteredWords").show(10)
+    print("Following stop words/tokens will be deleted: %s" % remover.getStopWords())
 
-    # each row as a separate document in terms of TF-IDF
-    # token hashing with hash function MurmurHash3_x86_32
     # TODO: optimize num_features amount while evaluating a ML model
     num_features = 512
     hashing_tf = HashingTF(inputCol="FilteredWords", outputCol="RawFeatures", numFeatures=num_features)
-    featurized_data = hashing_tf.transform(filtered_words)
 
-    idf = IDF(inputCol="RawFeatures", outputCol="Features")
-    idfModel = idf.fit(featurized_data)
-    rescaled_data = idfModel.transform(featurized_data)
+    # TODO: figure out what's the meaning of minDocFreq and optionally optimize it
+    idf = IDF(inputCol="RawFeatures", outputCol="features", minDocFreq=5)
 
-    rescaled_data.select("Product", "Features").show()
+    product_indexer = StringIndexer(inputCol="Product", outputCol="label")
+
+    ml_pipeline = Pipeline(stages=[tokenizer, remover, hashing_tf, idf, product_indexer])
+    pipeline_fit = ml_pipeline.fit(renamed_df)
+    dataset = pipeline_fit.transform(renamed_df)
+
+    (training_data, test_data) = dataset.randomSplit([0.5, 0.5], seed=100)
+
+    # NaiveBayes model
+    # TODO: what's the meaning of the smoothing factor
+    nb = NaiveBayes(smoothing=1)
+    model = nb.fit(training_data)
+
+    predictions = model.transform(test_data)
+
+    predictions.filter(predictions['prediction'] == 0) \
+        .select("Product", "ConsumerComplaint", "probability", "label", "prediction") \
+        .orderBy("probability", ascending=False) \
+        .show(n=10, truncate=30)
+
+    evaluator = MulticlassClassificationEvaluator(predictionCol="prediction")
+
+    # Evaluation roughly: 0.55
+    print(evaluator.evaluate(predictions))
 
     # time of end
     end_timestamp = dt.now()
