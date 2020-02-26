@@ -14,7 +14,7 @@ from pyspark.sql.functions import *
 from pyspark.sql.functions import udf
 from pyspark.ml.feature import HashingTF, IDF, Tokenizer, StopWordsRemover, StringIndexer
 from pyspark.ml import Pipeline
-from pyspark.ml.classification import NaiveBayes
+from pyspark.ml.classification import NaiveBayes, LogisticRegression
 from pyspark.ml.evaluation import MulticlassClassificationEvaluator
 
 
@@ -71,6 +71,8 @@ def main():
         StructField("IsConsumerDisputed", StringType(), True),
         StructField("ComplaintId", IntegerType(), True),
     ])
+
+    print("Starting preprocessing and data cleansing...")
 
     # read Consumer_Complaints.csv file and apply schema
     complaint_df = spark_session.read \
@@ -185,39 +187,71 @@ def main():
 
     # remove stop words
     remover = StopWordsRemover(inputCol="Words", outputCol="FilteredWords")
-    print("Following stop words/tokens will be deleted: %s" % remover.getStopWords())
 
     # TODO: optimize num_features amount while evaluating a ML model
     num_features = 512
     hashing_tf = HashingTF(inputCol="FilteredWords", outputCol="RawFeatures", numFeatures=num_features)
 
     # TODO: figure out what's the meaning of minDocFreq and optionally optimize it
+    # minDocFreq: minimum number of documents in which a term should appear for filtering
+    # minDocFreq = 5 - optimized
     idf = IDF(inputCol="RawFeatures", outputCol="features", minDocFreq=5)
 
     product_indexer = StringIndexer(inputCol="Product", outputCol="label")
 
-    ml_pipeline = Pipeline(stages=[tokenizer, remover, hashing_tf, idf, product_indexer])
-    pipeline_fit = ml_pipeline.fit(renamed_df)
+    pipeline = Pipeline(stages=[tokenizer, remover, hashing_tf, idf, product_indexer])
+
+    pipeline_fit = pipeline.fit(renamed_df)
     dataset = pipeline_fit.transform(renamed_df)
 
+    # randomly slice the data into training and test datasets with requested ratio
     (training_data, test_data) = dataset.randomSplit([0.5, 0.5], seed=100)
 
     # NaiveBayes model
     # TODO: what's the meaning of the smoothing factor
     nb = NaiveBayes(smoothing=1)
     model = nb.fit(training_data)
-
     predictions = model.transform(test_data)
-
-    predictions.filter(predictions['prediction'] == 0) \
+    predictions.filter(predictions['prediction'] != 0) \
         .select("Product", "ConsumerComplaint", "probability", "label", "prediction") \
         .orderBy("probability", ascending=False) \
         .show(n=10, truncate=30)
 
-    evaluator = MulticlassClassificationEvaluator(predictionCol="prediction")
+    nb_evaluator = MulticlassClassificationEvaluator(predictionCol="prediction")
 
-    # Evaluation roughly: 0.55
-    print(evaluator.evaluate(predictions))
+    # Accuracy roughly (f1 score): 0.55 for 512 numFeatures
+    print("Naive-Bayes evaluation score: " + str(nb_evaluator.evaluate(predictions)))
+
+    # LogisticRegression model
+    # lr = LogisticRegression(maxIter=20, regParam=0.3, elasticNetParam=0)
+    # lrModel = lr.fit(training_data)
+
+    # predictions = lrModel.transform(test_data)
+    # predictions.filter(predictions['prediction'] != 0) \
+        # .select("Product", "ConsumerComplaint", "probability", "label", "prediction") \
+        # .orderBy("probability", ascending=False) \
+        # .show(n=10, truncate=30)
+
+    # lr_evaluator = MulticlassClassificationEvaluator(labelCol= "label", predictionCol="prediction", metricName="f1")
+    # Accuracy roughly (f1 score): 0.45, 0.49 for 9600
+    # print("LogisticRegression evaluation score: " + str(lr_evaluator.evaluate(predictions)))
+
+    # Confusion Matrix or Cross Validation
+    """
+    paramGrid = ParamGridBuilder()\
+    .addGrid(hashingTF.numFeatures,[1000,10000,100000])\
+    .addGrid(idf.minDocFreq,[0,10,100])\
+    .build()
+    
+    cv = CrossValidator().setEstimator(pipeline).setEvaluator(evaluator).setEstimatorParamMaps(paramGrid).setNumFolds(2)
+    
+    cvModel = cv.fit(train_set)
+    print "Area under the ROC curve for best fitted model =",evaluator.evaluate(cvModel.transform(test_set))
+    
+    print "Area under ROC curve for non-tuned model:",evaluator.evaluate(predictions)
+    print "Area under ROC curve for fitted model:",evaluator.evaluate(cvModel.transform(test_set))
+    print "Improvement:%.2f".format(evaluator.evaluate(cvModel.transform(test_set)) - evaluator.evaluate(predictions))*100 / evaluator.evaluate(predictions))
+    """
 
     # time of end
     end_timestamp = dt.now()
