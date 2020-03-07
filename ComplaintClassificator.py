@@ -7,6 +7,8 @@
 from datetime import datetime as dt
 import re
 
+from pyspark.ml.tuning import ParamGridBuilder, CrossValidator
+from pyspark.mllib.evaluation import MulticlassMetrics
 from pyspark.sql import SparkSession
 from pyspark.sql.types import *
 from pyspark.conf import SparkConf
@@ -22,30 +24,30 @@ AMERICAN_STATES = 'AmericanStatesAbb.json'
 
 
 def main():
-    # instantiate SparkConf
+    # Instantiate SparkConf
     spark_conf = SparkConf()
 
-    # build SparkSession with already instantiated SparkConf (spark_conf)
-    spark_session = SparkSession.builder \
-        .master("local[2]") \
-        .appName("ComplaintClassificator") \
-        .config(conf=spark_conf) \
-        .getOrCreate()
+    # Build SparkSession with already instantiated SparkConf (spark_conf)
+    spark_session = (SparkSession.builder
+                     .master("local[*]")
+                     .appName("ComplaintClassificator")
+                     .config(conf=spark_conf)
+                     .getOrCreate())
 
-    # time of start
+    # Timestamp of start
     start_timestamp = dt.now()
 
-    # define SparkContext
+    # Define SparkContext
     sc = spark_session.sparkContext
 
-    # set log level to 'WARN'
+    # Set log level to 'WARN'
     sc.setLogLevel('WARN')
 
-    # set up log4j logging
+    # Set up log4j logging
     log4j_logger = sc._jvm.org.apache.log4j
     logger = log4j_logger.LogManager.getLogger(__name__)
 
-    # create customized schema as a StructType of StructField(s)
+    # Create custom schema as a StructType of StructField(s)
     custom_schema = StructType([
         StructField("ReceivedDate", StringType(), True),
         StructField("Product", StringType(), True),
@@ -64,130 +66,128 @@ def main():
         StructField("CompanyResponseToConsument", StringType(), True),
         StructField("IsTimelyResponse", StringType(), True),
         StructField("IsConsumerDisputed", StringType(), True),
-        StructField("ComplaintId", IntegerType(), True),
-    ])
+        StructField("ComplaintId", IntegerType(), True)])
 
     logger.warn("Starting preprocessing and data cleansing...")
 
-    # read Consumer_Complaints.csv file and apply schema
-    complaint_df = spark_session.read \
-        .format("csv") \
-        .option("header", "true") \
-        .option("delimiter", ",") \
-        .option("mode", "FAILFAST") \
-        .option("parserLib", "univocity") \
-        .option("escape", '"') \
-        .option("multiLine", "true") \
-        .option("inferSchema", "false") \
-        .schema(custom_schema) \
-        .load(CONSUMER_COMPLAINTS) \
-        .alias("complaint_df")
+    # Read Consumer_Complaints.csv file and apply schema
+    complaint_df = (spark_session.read
+                    .format("csv")
+                    .option("header", "true")
+                    .option("delimiter", ",")
+                    .option("mode", "FAILFAST")
+                    .option("parserLib", "univocity")
+                    .option("escape", '"')
+                    .option("multiLine", "true")
+                    .option("inferSchema", "false")
+                    .schema(custom_schema)
+                    .load(CONSUMER_COMPLAINTS)
+                    .alias("complaint_df"))
 
-    # print statistics of a complaint_df DataFrame abstraction
+    # Print statistics of a complaint_df DataFrame abstraction
     logger.warn("complaint_df has %d records, %d columns." % (complaint_df.count(), len(complaint_df.columns)))
     logger.warn("Schema: ")
     complaint_df.printSchema()
 
-    # register cleanse_files function as an UDF (UserDefinedFunction)
+    # Register cleanse_files function as an UDF (UserDefinedFunction)
     udf_cleansed_field = udf(cleanse_field, StringType())
 
-    # provide a lambda function to format date-type field to 'YYYY-MM-DD' pattern
+    # Provide a lambda function to format date-type field to 'YYYY-MM-DD' pattern
     change_data_format = udf(lambda x: dt.strptime(x, '%m/%d/%Y'), DateType())
 
-    # apply predefined udf_cleansed_field function to "ConsumerComplaintNarrative" as well as
-    # to "CompanyResponseToConsument" field an modify letters to lower case, apply udf_cleansed_field
-    # to "CompanyResponseToConsument" field and rename this field to 'CompanyResponse',
-    # drop field 'CompanyResponseToConsument', change date format in 'ReceivedDate' field
-    cleansed_init_df = complaint_df.withColumn('Issue', udf_cleansed_field(complaint_df["ConsumerComplaintNarrative"])) \
-        .withColumn('ReceivedDate', change_data_format(complaint_df['ReceivedDate'])) \
-        .withColumn('CompanyResponse', udf_cleansed_field(complaint_df['CompanyResponseToConsument'])) \
-        .drop('CompanyResponseToConsument')
+    # Do some clean-up activities
+    cleansed_df = (complaint_df.withColumn('Issue', udf_cleansed_field(complaint_df["ConsumerComplaintNarrative"]))
+                   .withColumn('ReceivedDate', change_data_format(complaint_df['ReceivedDate']))
+                   .withColumn('CompanyResponse', udf_cleansed_field(complaint_df['CompanyResponseToConsument']))
+                   .drop('CompanyResponseToConsument'))
 
-    # print statistics of a cleansed_init_df DataFrame abstraction
-    logger.warn("cleansed_init_df has %d records, %d columns." % (cleansed_init_df.count(), len(cleansed_init_df.columns)))
+    # Print statistics of a cleansed_init_df DataFrame abstraction
+    logger.warn("cleansed_init_df has %d records, %d columns." % (cleansed_df.count(), len(cleansed_df.columns)))
     logger.warn("Schema: ")
-    cleansed_init_df.printSchema()
+    cleansed_df.printSchema()
 
-    # optionally apply filter on 'CompanyResponse' field to show only closed complaints
+    # Optionally apply filter on 'CompanyResponse' field to show only closed complaints
     # filtered_response = cleansed_init_df.filter(cleansed_init_df['CompanyResponse'].rlike('close'))
 
-    # select only needed fields, check whether some of these fields are not null, so that the data
-    # is consistent in further steps of processing, order by 'ReceivedDate' in case of a look-up
-    final_complaints = cleansed_init_df.select('ComplaintId', 'ReceivedDate', 'State', 'Product',
-                                               'ConsumerComplaintNarrative', 'Issue', 'CompanyResponse') \
-                                        .where(cleansed_init_df['ConsumerComplaintNarrative'].isNotNull()) \
-                                        .orderBy(cleansed_init_df['ReceivedDate'])
+    # Reduce a number of fields and filter non-null values out on consumer complaint narratives
+    final_complaints_df = (cleansed_df.where(cleansed_df['ConsumerComplaintNarrative'].isNotNull())
+                           .select('ComplaintId', 'ReceivedDate', 'State', 'Product',
+                                   'ConsumerComplaintNarrative', 'Issue', 'CompanyResponse')
+                           .orderBy(cleansed_df['ReceivedDate']))
 
-    # print statistics of a final_complaints DataFrame abstraction
-    logger.warn("final_complaints has %d records, %d columns." % (final_complaints.count(), len(final_complaints.columns)))
+    # Print statistics of a final_complaints DataFrame abstraction
+    logger.warn("final_complaints has %d records, %d columns." %
+                (final_complaints_df.count(), len(final_complaints_df.columns)))
     logger.warn("Schema: ")
-    final_complaints.printSchema()
+    final_complaints_df.printSchema()
 
-    # possible filtering on 'ReceivedDate' field for the filtered_response DataFrame abstraction
+    # Possible filtering on 'ReceivedDate' field for the filtered_response DataFrame abstraction
     # .filter(year(filtered_response['ReceivedDate']).between(2013, 2015)) \
 
-    # read states json provider as a states_df DataFrame abstraction
-    states_df = spark_session.read \
-        .json(AMERICAN_STATES, multiLine=True) \
-        .alias("states_df")
+    # Read states json provider as a states_df DataFrame abstraction
+    states_df = (spark_session.read
+                 .json(AMERICAN_STATES, multiLine=True)
+                 .alias("states_df"))
 
-    # print statistics of a states_df DataFrame abstraction
+    # Print statistics of a states_df DataFrame abstraction
     logger.warn("states_df has %d records, %d columns." % (states_df.count(), len(states_df.columns)))
     logger.warn("Schema: ")
     states_df.printSchema()
 
-    # list of fields to drop (not needed for the further processing)
+    # List of fields to drop (not needed for the further processing)
     drop_list = ["state", "abbreviation"]
 
-    # left join of final_complaints with states_df on "complaint_df.State" == "states_df.abbreviation"
-    # field with explicitly broadcasted states_df DataFrame abstraction in order to reduced costs
-    # of communication (keep a read-only dataset cached on each node)
-    joined_df = final_complaints.join(broadcast(states_df), col("complaint_df.State") == col("states_df.abbreviation"), "left") \
-                                .withColumnRenamed("ConsumerComplaintNarrative", "ConsumerComplaint") \
-                                .withColumn("RowNoIndex", monotonically_increasing_id()) \
-                                .select("Product", "ConsumerComplaint", "CompanyResponse") \
-                                .drop(*drop_list)
+    # Join complaints data with American states, apply id field and drop unnecessary fields
+    joined_df = (
+        final_complaints_df.join(broadcast(states_df), col("complaint_df.State") == col("states_df.abbreviation"),
+                                 "left")
+            .withColumnRenamed("ConsumerComplaintNarrative", "ConsumerComplaint")
+            .withColumn("RowNoIndex", monotonically_increasing_id())
+            .select("Product", "ConsumerComplaint", "CompanyResponse")
+            .drop(*drop_list))
 
-    # possible filtering on 'State' field for the states_df DataFrame abstraction
+    # Possible filtering on 'State' field for the states_df DataFrame abstraction
     # .where(states_df['name'].contains('California'))
 
-    # print statistics of a joined_df DataFrame abstraction
+    # Print statistics of a joined_df DataFrame abstraction
     logger.warn("joined_df has %d records, %d columns." % (joined_df.count(), len(joined_df.columns)))
     logger.warn("Schema: ")
     joined_df.printSchema()
 
-    # check unique labels of Product attribute before replace
+    # Check unique labels of Product attribute before replace
     joined_df.select("Product").distinct().show()
 
-    renamed_df = joined_df.withColumn("Product", regexp_replace("Product", "Credit reporting, credit repair services, or other personal consumer reports", "Credit reporting, repair, or other")) \
-                          .withColumn("Product", regexp_replace("Product", "Virtual currency", "Money transfer, virtual currency, or money service")) \
-                          .withColumn("Product", regexp_replace("Product", "Money transfer", "Money transfer, virtual currency, or money service")) \
-                          .withColumn("Product", regexp_replace("Product", "Payday loan", "Payday loan, title loan, or personal loan")) \
-                          .withColumn("Product", regexp_replace("Product", "Credit reporting", "Credit reporting, repair, or other")) \
-                          .withColumn("Product", regexp_replace("Product", "Prepaid card", "Credit card or prepaid card")) \
-                          .withColumn("Product", regexp_replace("Product", "Credit card", "Credit card or prepaid card"))
+    # Replace redundant labels from Product field
+    renamed_df = (joined_df.withColumn("Product", regexp_replace("Product", "Credit reporting, credit repair services, or other personal consumer reports", "Credit reporting, repair, or other"))
+                  .withColumn("Product", regexp_replace("Product", "Virtual currency", "Money transfer, virtual currency, or money service"))
+                  .withColumn("Product", regexp_replace("Product", "Money transfer", "Money transfer, virtual currency, or money service"))
+                  .withColumn("Product", regexp_replace("Product", "Payday loan", "Payday loan, title loan, or personal loan"))
+                  .withColumn("Product", regexp_replace("Product", "Credit reporting", "Credit reporting, repair, or other"))
+                  .withColumn("Product", regexp_replace("Product", "Prepaid card", "Credit card or prepaid card"))
+                  .withColumn("Product", regexp_replace("Product", "Credit card", "Credit card or prepaid card")))
 
-    # check unique labels of Product attribute after replace
+    # Check unique labels of Product attribute after replace
     renamed_df.select("Product").distinct().show()
 
-    # check amount of unique labels of Product attribute after replace
+    # Check amount of unique labels of Product attribute after replace
     logger.warn(str(renamed_df.select("Product").distinct().count()))
 
     logger.warn("Starting feature extraction...")
 
-    # tokenize consumer complaints sentences
+    # Tokenize consumer complaints sentences
     tokenizer = Tokenizer(inputCol="ConsumerComplaint", outputCol="Words")
 
-    # remove stop words
+    # Remove stop words
     remover = StopWordsRemover(inputCol="Words", outputCol="FilteredWords")
 
     # TODO: optimize num_features amount while evaluating a ML model
+    # The best result was for 700
     num_features = 700
-    hashing_tf = HashingTF(inputCol="FilteredWords", outputCol="RawFeatures", numFeatures=num_features)
+    hashing_tf = HashingTF(inputCol="FilteredWords", outputCol="RawFeatures")
 
     # TODO: figure out what's the meaning of minDocFreq and optionally optimize it
     # minDocFreq: minimum number of documents in which a term should appear for filtering
-    idf = IDF(inputCol="RawFeatures", outputCol="features", minDocFreq=1)
+    idf = IDF(inputCol="RawFeatures", outputCol="features")
 
     product_indexer = StringIndexer(inputCol="Product", outputCol="label")
 
@@ -197,37 +197,64 @@ def main():
 
     dataset = pipeline_fit.transform(renamed_df)
 
-    # randomly slice the data into training and test datasets with requested ratio
+    # Randomly slice the data into training and test datasets with requested ratio
     (training_data, test_data) = dataset.randomSplit([0.7, 0.3], seed=100)
 
-    # NaiveBayes model
+    # NaïveBayes model
     # TODO: what's the meaning of the smoothing factor
-    nb = NaiveBayes(smoothing=1)
-    model = nb.fit(training_data)
-    predictions = model.transform(test_data)
-    predictions.filter(predictions['prediction'] != predictions['label']) \
-        .select("Product", "ConsumerComplaint", "CompanyResponse", "probability", "label", "prediction") \
-        .orderBy("probability", ascending=False) \
-        .show(n=10, truncate=30)
 
-    nb_evaluator = MulticlassClassificationEvaluator(labelCol="label", predictionCol="prediction", metricName="f1")
+    nb = NaiveBayes(labelCol="label", featuresCol="features")
 
-    logger.warn("Naive-Bayes evaluation score: " + str(nb_evaluator.evaluate(predictions)))
+    # Instantiate ParamGridBuilder for CV purpose
+    nbp_params_grid = (ParamGridBuilder()
+                       .addGrid(nb.smoothing, [0.0, 0.2, 0.4, 0.6, 0.8, 1.0])
+                       .addGrid(hashing_tf.numFeatures, [1000, 10000, 100000])
+                       .addGrid(idf.minDocFreq, [1, 10, 100])
+                       .build())
 
-    # LogisticRegression model
-    # lr = LogisticRegression(maxIter=20, regParam=0.3, elasticNetParam=0)
-    # lrModel = lr.fit(training_data)
+    # Evaluation of the model
+    nb_evaluator = MulticlassClassificationEvaluator(labelCol="label", predictionCol="prediction")
 
-    # predictions = lrModel.transform(test_data)
-    # predictions.filter(predictions['prediction'] != 0) \
-        # .select("Product", "ConsumerComplaint", "probability", "label", "prediction") \
-        # .orderBy("probability", ascending=False) \
-        # .show(n=10, truncate=30)
+    # TODO: what's the 5-fold
+    # Instantiate 5-fold CrossValidator
+    nb_cv = CrossValidator(estimator=nb,
+                           estimatorParamMaps=nbp_params_grid,
+                           evaluator=nb_evaluator,
+                           numFolds=5)
 
-    # lr_evaluator = MulticlassClassificationEvaluator(labelCol= "label", predictionCol="prediction", metricName="f1")
+    # Cross validations
+    nb_cv_model = nb_cv.fit(training_data)
 
-    # print("LogisticRegression evaluation score: " + str(lr_evaluator.evaluate(predictions)))
+    print(nb_cv_model)
 
+    # Use test set here so we can measure the accuracy of our model on new data
+    nb_predictions = nb_cv_model.transform(training_data)
+
+    # Evaluate best model from Cross Validation
+    print('Naive-Bayes evaluation score (accuracy):', str(nb_evaluator.evaluate(nb_predictions)))
+    # TODO: provide some metrics
+    print('AUC:', MulticlassMetrics(nb_predictions['label', 'prediction'].rdd).precision)
+
+    (nb_predictions.filter(nb_predictions['prediction'] != nb_predictions['label'])
+     .select("Product", "ConsumerComplaint", "CompanyResponse", "probability", "label", "prediction")
+     .orderBy("probability", ascending=False)
+     .show(n=10, truncate=20))
+
+    """
+    LogisticRegression model
+    lr = LogisticRegression(maxIter=20, regParam=0.3, elasticNetParam=0)
+    lrModel = lr.fit(training_data)
+
+    predictions = lrModel.transform(test_data)
+    predictions.filter(predictions['prediction'] != 0) \
+    .select("Product", "ConsumerComplaint", "probability", "label", "prediction") \
+    .orderBy("probability", ascending=False) \
+    .show(n=10, truncate=30)
+
+    lr_evaluator = MulticlassClassificationEvaluator(labelCol= "label", predictionCol="prediction", metricName="f1")
+
+    print("LogisticRegression evaluation score: " + str(lr_evaluator.evaluate(predictions)))
+    """
     # Confusion Matrix or Cross Validation
     """
     paramGrid = ParamGridBuilder()\
@@ -245,13 +272,13 @@ def main():
     print "Improvement:%.2f".format(evaluator.evaluate(cvModel.transform(test_set)) - evaluator.evaluate(predictions))*100 / evaluator.evaluate(predictions))
     """
 
-    # time of end
+    # Timestamp of end
     end_timestamp = dt.now()
 
-    # print elapsed time
+    # Print elapsed time
     print("Elapsed time: %s" % str(end_timestamp - start_timestamp))
 
-    # stop SparkSession
+    # Stop SparkSession
     spark_session.stop()
 
 
