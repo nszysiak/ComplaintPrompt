@@ -139,8 +139,7 @@ def main():
 
     # Join complaints data with American states, apply id field and drop unnecessary fields
     joined_df = (
-        final_complaints_df.join(broadcast(states_df), col("complaint_df.State") == col("states_df.abbreviation"),
-                                 "left")
+        final_complaints_df.join(broadcast(states_df), col("complaint_df.State") == col("states_df.abbreviation"), "left")
             .withColumnRenamed("ConsumerComplaintNarrative", "ConsumerComplaint")
             .withColumn("RowNoIndex", monotonically_increasing_id())
             .select("Product", "ConsumerComplaint", "CompanyResponse")
@@ -200,6 +199,9 @@ def main():
     # Randomly slice the data into training and test datasets with requested ratio
     (training_data, test_data) = dataset.randomSplit([0.7, 0.3], seed=100)
 
+    # Cache training_data
+    training_data.cache()
+
     # NaïveBayes model
     # TODO: what's the meaning of the smoothing factor
 
@@ -207,9 +209,9 @@ def main():
 
     # Instantiate ParamGridBuilder for CV purpose
     nbp_params_grid = (ParamGridBuilder()
-                       .addGrid(nb.smoothing, [0.0, 0.2, 0.4, 0.6, 0.8, 1.0])
-                       .addGrid(hashing_tf.numFeatures, [1000, 10000, 100000])
-                       .addGrid(idf.minDocFreq, [1, 10, 100])
+                       .addGrid(nb.smoothing, [0.4, 0.8, 1.0])
+                       .addGrid(hashing_tf.numFeatures, [700, 750])
+                       .addGrid(idf.minDocFreq, [1, 2, 3])
                        .build())
 
     # Evaluation of the model
@@ -232,8 +234,15 @@ def main():
 
     # Evaluate best model from Cross Validation
     print('Naive-Bayes evaluation score (accuracy):', str(nb_evaluator.evaluate(nb_predictions)))
-    # TODO: provide some metrics
-    print('AUC:', MulticlassMetrics(nb_predictions['label', 'prediction'].rdd).precision)
+    # TODO: want another metric?
+    metrics_rdd = MulticlassMetrics(nb_predictions['label', 'prediction'].rdd)
+
+    print('Precision: ', metrics_rdd.precision())
+    print('Accuracy: ', metrics_rdd.accuracy())
+    print('Recall: ', metrics_rdd.recall())
+    print('Recall: ', metrics_rdd.recall())
+    print('F1 score: ', metrics_rdd.fMeasure())
+    print('Confusion matrix: ', metrics_rdd.confusionMatrix())
 
     (nb_predictions.filter(nb_predictions['prediction'] != nb_predictions['label'])
      .select("Product", "ConsumerComplaint", "CompanyResponse", "probability", "label", "prediction")
