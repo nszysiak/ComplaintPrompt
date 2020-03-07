@@ -20,7 +20,7 @@ from pyspark.ml.classification import NaiveBayes, LogisticRegression
 from pyspark.ml.evaluation import MulticlassClassificationEvaluator
 
 CONSUMER_COMPLAINTS = "C:/Users/Norbert Szysiak/Desktop/Consumer_Complaints.csv"
-AMERICAN_STATES = 'AmericanStatesAbb.json'
+AMERICAN_STATES = "AmericanStatesAbb.json"
 
 
 def main():
@@ -30,7 +30,7 @@ def main():
     # Build SparkSession with already instantiated SparkConf (spark_conf)
     spark_session = (SparkSession.builder
                      .master("local[*]")
-                     .appName("ComplaintClassificator")
+                     .appName('ComplaintClassificator')
                      .config(conf=spark_conf)
                      .getOrCreate())
 
@@ -49,40 +49,40 @@ def main():
 
     # Create custom schema as a StructType of StructField(s)
     custom_schema = StructType([
-        StructField("ReceivedDate", StringType(), True),
-        StructField("Product", StringType(), True),
-        StructField("Subproduct", StringType(), True),
-        StructField("Issue", StringType(), True),
-        StructField("Subissue", StringType(), True),
-        StructField("ConsumerComplaintNarrative", StringType(), True),
-        StructField("CompanyPublicResponse", StringType(), True),
-        StructField("CompanyName", StringType(), True),
-        StructField("State", StringType(), True),
-        StructField("ZipCode", IntegerType(), True),
-        StructField("Tags", StringType(), True),
-        StructField("IsConsumerConsent", StringType(), True),
-        StructField("SubmittedVia", StringType(), True),
-        StructField("SentDate", StringType(), True),
-        StructField("CompanyResponseToConsument", StringType(), True),
-        StructField("IsTimelyResponse", StringType(), True),
-        StructField("IsConsumerDisputed", StringType(), True),
-        StructField("ComplaintId", IntegerType(), True)])
+        StructField('ReceivedDate', StringType(), True),
+        StructField('Product', StringType(), True),
+        StructField('Subproduct', StringType(), True),
+        StructField('Issue', StringType(), True),
+        StructField('Subissue', StringType(), True),
+        StructField('ConsumerComplaintNarrative', StringType(), True),
+        StructField('CompanyPublicResponse', StringType(), True),
+        StructField('CompanyName', StringType(), True),
+        StructField('State', StringType(), True),
+        StructField('ZipCode', IntegerType(), True),
+        StructField('Tags', StringType(), True),
+        StructField('IsConsumerConsent', StringType(), True),
+        StructField('SubmittedVia', StringType(), True),
+        StructField('SentDate', StringType(), True),
+        StructField('CompanyResponseToConsument', StringType(), True),
+        StructField('IsTimelyResponse', StringType(), True),
+        StructField('IsConsumerDisputed', StringType(), True),
+        StructField('ComplaintId', IntegerType(), True)])
 
     logger.warn("Starting preprocessing and data cleansing...")
 
     # Read Consumer_Complaints.csv file and apply schema
     complaint_df = (spark_session.read
-                    .format("csv")
-                    .option("header", "true")
-                    .option("delimiter", ",")
-                    .option("mode", "FAILFAST")
-                    .option("parserLib", "univocity")
-                    .option("escape", '"')
-                    .option("multiLine", "true")
-                    .option("inferSchema", "false")
+                    .format('csv')
+                    .option('header', 'true')
+                    .option('delimiter', ',')
+                    .option('mode', 'FAILFAST')
+                    .option('parserLib', 'univocity')
+                    .option('escape', '"')
+                    .option('multiLine', 'true')
+                    .option('inferSchema', 'false')
                     .schema(custom_schema)
                     .load(CONSUMER_COMPLAINTS)
-                    .alias("complaint_df"))
+                    .alias('complaint_df'))
 
     # Print statistics of a complaint_df DataFrame abstraction
     logger.warn("complaint_df has %d records, %d columns." % (complaint_df.count(), len(complaint_df.columns)))
@@ -96,7 +96,7 @@ def main():
     change_data_format = udf(lambda x: dt.strptime(x, '%m/%d/%Y'), DateType())
 
     # Do some clean-up activities
-    cleansed_df = (complaint_df.withColumn('Issue', udf_cleansed_field(complaint_df["ConsumerComplaintNarrative"]))
+    cleansed_df = (complaint_df.withColumn('Issue', udf_cleansed_field(complaint_df['ConsumerComplaintNarrative']))
                    .withColumn('ReceivedDate', change_data_format(complaint_df['ReceivedDate']))
                    .withColumn('CompanyResponse', udf_cleansed_field(complaint_df['CompanyResponseToConsument']))
                    .drop('CompanyResponseToConsument'))
@@ -127,7 +127,7 @@ def main():
     # Read states json provider as a states_df DataFrame abstraction
     states_df = (spark_session.read
                  .json(AMERICAN_STATES, multiLine=True)
-                 .alias("states_df"))
+                 .alias('states_df'))
 
     # Print statistics of a states_df DataFrame abstraction
     logger.warn("states_df has %d records, %d columns." % (states_df.count(), len(states_df.columns)))
@@ -135,14 +135,14 @@ def main():
     states_df.printSchema()
 
     # List of fields to drop (not needed for the further processing)
-    drop_list = ["state", "abbreviation"]
+    drop_list = ['state', 'abbreviation']
 
     # Join complaints data with American states, apply id field and drop unnecessary fields
     joined_df = (
-        final_complaints_df.join(broadcast(states_df), col("complaint_df.State") == col("states_df.abbreviation"), "left")
-            .withColumnRenamed("ConsumerComplaintNarrative", "ConsumerComplaint")
-            .withColumn("RowNoIndex", monotonically_increasing_id())
-            .select("Product", "ConsumerComplaint", "CompanyResponse")
+        final_complaints_df.join(broadcast(states_df), col('complaint_df.State') == col('states_df.abbreviation'), "left")
+            .withColumnRenamed('ConsumerComplaintNarrative', 'ConsumerComplaint')
+            .withColumn('RowNoIndex', monotonically_increasing_id())
+            .select('Product', 'ConsumerComplaint', 'CompanyResponse')
             .drop(*drop_list))
 
     # Possible filtering on 'State' field for the states_df DataFrame abstraction
@@ -154,46 +154,49 @@ def main():
     joined_df.printSchema()
 
     # Check unique labels of Product attribute before replace
-    joined_df.select("Product").distinct().show()
+    joined_df.select('Product').distinct().show()
 
     # Replace redundant labels from Product field
-    renamed_df = (joined_df.withColumn("Product", regexp_replace("Product", "Credit reporting, credit repair services, or other personal consumer reports", "Credit reporting, repair, or other"))
-                  .withColumn("Product", regexp_replace("Product", "Virtual currency", "Money transfer, virtual currency, or money service"))
-                  .withColumn("Product", regexp_replace("Product", "Money transfer", "Money transfer, virtual currency, or money service"))
-                  .withColumn("Product", regexp_replace("Product", "Payday loan", "Payday loan, title loan, or personal loan"))
-                  .withColumn("Product", regexp_replace("Product", "Credit reporting", "Credit reporting, repair, or other"))
-                  .withColumn("Product", regexp_replace("Product", "Prepaid card", "Credit card or prepaid card"))
-                  .withColumn("Product", regexp_replace("Product", "Credit card", "Credit card or prepaid card")))
+    renamed_df = (joined_df.withColumn('Product', regexp_replace('Product', "Credit reporting, credit repair services, or other personal consumer reports", "Credit reporting, repair, or other"))
+                  .withColumn('Product', regexp_replace("Product", "Virtual currency", "Money transfer, virtual currency, or money service"))
+                  .withColumn('Product', regexp_replace("Product", "Money transfer", "Money transfer, virtual currency, or money service"))
+                  .withColumn('Product', regexp_replace("Product", "Payday loan", "Payday loan, title loan, or personal loan"))
+                  .withColumn('Product', regexp_replace("Product", "Credit reporting", "Credit reporting, repair, or other"))
+                  .withColumn('Product', regexp_replace("Product", "Prepaid card", "Credit card or prepaid card"))
+                  .withColumn('Product', regexp_replace("Product", "Credit card", "Credit card or prepaid card")))
 
     # Check unique labels of Product attribute after replace
-    renamed_df.select("Product").distinct().show()
+    renamed_df.select('Product').distinct().show()
 
     # Check amount of unique labels of Product attribute after replace
-    logger.warn(str(renamed_df.select("Product").distinct().count()))
+    logger.warn(str(renamed_df.select('Product').distinct().count()))
 
     logger.warn("Starting feature extraction...")
 
     # Tokenize consumer complaints sentences
-    tokenizer = Tokenizer(inputCol="ConsumerComplaint", outputCol="Words")
+    tokenizer = Tokenizer(inputCol='ConsumerComplaint', outputCol='Words')
 
     # Remove stop words
-    remover = StopWordsRemover(inputCol="Words", outputCol="FilteredWords")
+    remover = StopWordsRemover(inputCol='Words', outputCol='FilteredWords')
 
     # TODO: optimize num_features amount while evaluating a ML model
     # The best result was for 700
     num_features = 700
-    hashing_tf = HashingTF(inputCol="FilteredWords", outputCol="RawFeatures")
+    hashing_tf = HashingTF(inputCol='FilteredWords', outputCol='RawFeatures')
 
-    # TODO: figure out what's the meaning of minDocFreq and optionally optimize it
     # minDocFreq: minimum number of documents in which a term should appear for filtering
-    idf = IDF(inputCol="RawFeatures", outputCol="features")
+    idf = IDF(inputCol='RawFeatures', outputCol='features')
 
-    product_indexer = StringIndexer(inputCol="Product", outputCol="label")
+    # Instantiate StringIndexer
+    product_indexer = StringIndexer(inputCol='Product', outputCol='label')
 
+    # Create a pipeline from previously defined feature extraction stages
     pipeline = Pipeline(stages=[tokenizer, remover, hashing_tf, idf, product_indexer])
 
+    # Fit renamed_df to the pipeline
     pipeline_fit = pipeline.fit(renamed_df)
 
+    # Transform pipeline_fit
     dataset = pipeline_fit.transform(renamed_df)
 
     # Randomly slice the data into training and test datasets with requested ratio
@@ -202,20 +205,40 @@ def main():
     # Cache training_data
     training_data.cache()
 
-    # NaïveBayes model
-    # TODO: what's the meaning of the smoothing factor
+    # Naïve-Bayes
+    nb = NaiveBayes(labelCol='label', featuresCol='features')
 
-    nb = NaiveBayes(labelCol="label", featuresCol="features")
+    # Create a model without Cross Validation
+    nb_model = nb.fit(training_data)
 
-    # Instantiate ParamGridBuilder for CV purpose
+    # Make predictions on model without Cross Validation
+    predictions = nb_model.transform(test_data)
+
+    # Show some results of predictions on the test dataset
+    predictions.filter(predictions['prediction'] != predictions['label']) \
+        .select("Product", "ConsumerComplaint", "probability", "label", "prediction") \
+        .orderBy("probability", ascending=False) \
+        .show(n=10, truncate=20)
+
+    # Instantiate an evaluation of predictions without Cross Validation
+    evaluator = MulticlassClassificationEvaluator(labelCol="label", predictionCol="prediction")
+
+    # Evaluate best model without an use of Cross Validation
+    accuracy_without_cv = evaluator.evaluate(predictions)
+
+    print("Naive-Bayes accuracy without Cross Validation: " + str(accuracy_without_cv))
+
+    logger.warn("Starting Cross Validation process...")
+
+    # Instantiate ParamGridBuilder for the Cross Validation purpose
     nbp_params_grid = (ParamGridBuilder()
                        .addGrid(nb.smoothing, [0.4, 0.8, 1.0])
                        .addGrid(hashing_tf.numFeatures, [700, 750])
                        .addGrid(idf.minDocFreq, [1, 2, 3])
                        .build())
 
-    # Evaluation of the model
-    nb_evaluator = MulticlassClassificationEvaluator(labelCol="label", predictionCol="prediction")
+    # Instantiate the Evaluator of the model
+    nb_evaluator = MulticlassClassificationEvaluator(labelCol='label', predictionCol='prediction')
 
     # TODO: what's the 5-fold
     # Instantiate 5-fold CrossValidator
@@ -224,46 +247,33 @@ def main():
                            evaluator=nb_evaluator,
                            numFolds=5)
 
-    # Cross validations
+    # Create a model with Cross Validation
     nb_cv_model = nb_cv.fit(training_data)
 
-    print(nb_cv_model)
+    # Make predictions on model with Cross Validation
+    cv_predictions = nb_cv_model.transform(training_data)
 
-    # Use test set here so we can measure the accuracy of our model on new data
-    nb_predictions = nb_cv_model.transform(training_data)
+    # Evaluate best model with an use of Cross Validation
+    accuracy_with_cv = nb_evaluator.evaluate(cv_predictions)
 
-    # Evaluate best model from Cross Validation
-    print('Naive-Bayes evaluation score (accuracy):', str(nb_evaluator.evaluate(nb_predictions)))
+    print('Naive-Bayes accuracy with Cross Validation:', str(accuracy_with_cv))
+
+    print("Difference in accuracy between NBwithCV and NB: ", str(accuracy_with_cv - accuracy_without_cv))
+
     # TODO: want another metric?
-    metrics_rdd = MulticlassMetrics(nb_predictions['label', 'prediction'].rdd)
+    metrics_rdd = MulticlassMetrics(cv_predictions['label', 'prediction'].rdd)
 
-    print('Precision: ', metrics_rdd.precision())
-    print('Accuracy: ', metrics_rdd.accuracy())
-    print('Recall: ', metrics_rdd.recall())
-    print('Recall: ', metrics_rdd.recall())
-    print('F1 score: ', metrics_rdd.fMeasure())
-    print('Confusion matrix: ', metrics_rdd.confusionMatrix())
+    print('Recall: ', str(metrics_rdd.recall()))
+    print('Accuracy: ', str(metrics_rdd.accuracy()))
+    print('F1 score: ', str(metrics_rdd.fMeasure()))
+    print('Precision: ', str(metrics_rdd.precision()))
+    print('Confusion matrix: ', str(metrics_rdd.confusionMatrix))
 
-    (nb_predictions.filter(nb_predictions['prediction'] != nb_predictions['label'])
-     .select("Product", "ConsumerComplaint", "CompanyResponse", "probability", "label", "prediction")
-     .orderBy("probability", ascending=False)
+    (cv_predictions.filter(cv_predictions['prediction'] != cv_predictions['label'])
+     .select('Product', 'ConsumerComplaint', 'CompanyResponse', 'probability', 'label', 'prediction')
+     .orderBy('probability', ascending=False)
      .show(n=10, truncate=20))
 
-    """
-    LogisticRegression model
-    lr = LogisticRegression(maxIter=20, regParam=0.3, elasticNetParam=0)
-    lrModel = lr.fit(training_data)
-
-    predictions = lrModel.transform(test_data)
-    predictions.filter(predictions['prediction'] != 0) \
-    .select("Product", "ConsumerComplaint", "probability", "label", "prediction") \
-    .orderBy("probability", ascending=False) \
-    .show(n=10, truncate=30)
-
-    lr_evaluator = MulticlassClassificationEvaluator(labelCol= "label", predictionCol="prediction", metricName="f1")
-
-    print("LogisticRegression evaluation score: " + str(lr_evaluator.evaluate(predictions)))
-    """
     # Confusion Matrix or Cross Validation
     """
     paramGrid = ParamGridBuilder()\
