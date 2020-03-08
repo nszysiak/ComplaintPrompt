@@ -3,9 +3,11 @@
 # @Author  : nszysiak
 # @File    : ComplaintClassificator.py
 # @Software: PyCharm
+# @Framework: Apache Spark 2.4.4
 
 from datetime import datetime as dt
 import re
+import os
 
 from pyspark.ml.tuning import ParamGridBuilder, CrossValidator
 from pyspark.mllib.evaluation import MulticlassMetrics
@@ -16,11 +18,12 @@ from pyspark.sql.functions import *
 from pyspark.sql.functions import udf
 from pyspark.ml.feature import HashingTF, IDF, Tokenizer, StopWordsRemover, StringIndexer
 from pyspark.ml import Pipeline
-from pyspark.ml.classification import NaiveBayes, LogisticRegression
+from pyspark.ml.classification import NaiveBayes, NaiveBayesModel, LogisticRegression
 from pyspark.ml.evaluation import MulticlassClassificationEvaluator
 
 CONSUMER_COMPLAINTS = "C:/Users/Norbert Szysiak/Desktop/Consumer_Complaints.csv"
 AMERICAN_STATES = "AmericanStatesAbb.json"
+CWD = os.getcwd()
 
 
 def main():
@@ -86,7 +89,7 @@ def main():
 
     # Print statistics of a complaint_df DataFrame abstraction
     logger.warn("complaint_df has %d records, %d columns." % (complaint_df.count(), len(complaint_df.columns)))
-    logger.warn("Schema: ")
+    logger.warn("Printing schema of complaint_df: ")
     complaint_df.printSchema()
 
     # Register cleanse_files function as an UDF (UserDefinedFunction)
@@ -103,7 +106,7 @@ def main():
 
     # Print statistics of a cleansed_init_df DataFrame abstraction
     logger.warn("cleansed_init_df has %d records, %d columns." % (cleansed_df.count(), len(cleansed_df.columns)))
-    logger.warn("Schema: ")
+    logger.warn("Printing schema of cleansed_df: ")
     cleansed_df.printSchema()
 
     # Optionally apply filter on 'CompanyResponse' field to show only closed complaints
@@ -118,7 +121,7 @@ def main():
     # Print statistics of a final_complaints DataFrame abstraction
     logger.warn("final_complaints has %d records, %d columns." %
                 (final_complaints_df.count(), len(final_complaints_df.columns)))
-    logger.warn("Schema: ")
+    logger.warn("Printing schema of final_complaints_df: ")
     final_complaints_df.printSchema()
 
     # Possible filtering on 'ReceivedDate' field for the filtered_response DataFrame abstraction
@@ -131,7 +134,7 @@ def main():
 
     # Print statistics of a states_df DataFrame abstraction
     logger.warn("states_df has %d records, %d columns." % (states_df.count(), len(states_df.columns)))
-    logger.warn("Schema: ")
+    logger.warn("Printing schema of states_df: ")
     states_df.printSchema()
 
     # List of fields to drop (not needed for the further processing)
@@ -150,7 +153,7 @@ def main():
 
     # Print statistics of a joined_df DataFrame abstraction
     logger.warn("joined_df has %d records, %d columns." % (joined_df.count(), len(joined_df.columns)))
-    logger.warn("Schema: ")
+    logger.warn("Printing schema of joined_df: ")
     joined_df.printSchema()
 
     # Check unique labels of Product attribute before replace
@@ -180,7 +183,6 @@ def main():
     remover = StopWordsRemover(inputCol='Words', outputCol='FilteredWords')
 
     # TODO: optimize num_features amount while evaluating a ML model
-    # The best result was for 700
     num_features = 700
     hashing_tf = HashingTF(inputCol='FilteredWords', outputCol='RawFeatures')
 
@@ -197,15 +199,17 @@ def main():
     pipeline_fit = pipeline.fit(renamed_df)
 
     # Transform pipeline_fit
-    dataset = pipeline_fit.transform(renamed_df)
+    data_set = pipeline_fit.transform(renamed_df)
 
     # Randomly slice the data into training and test datasets with requested ratio
-    (training_data, test_data) = dataset.randomSplit([0.7, 0.3], seed=100)
+    (training_data, test_data) = data_set.randomSplit([0.7, 0.3], seed=100)
 
     # Cache training_data
     training_data.cache()
 
-    # Naïve-Bayes
+    logger.warn("Starting Naive-Bayes...")
+
+    # Naive-Bayes
     nb = NaiveBayes(labelCol='label', featuresCol='features')
 
     # Create a model without Cross Validation
@@ -214,7 +218,25 @@ def main():
     # Make predictions on model without Cross Validation
     predictions = nb_model.transform(test_data)
 
-    # Show some results of predictions on the test dataset
+    print("NaiveBayes without CV model type: ", nb.getModelType())
+    print("NaiveBayes without CV smoothing factor: ", str(nb.getSmoothing()))
+    print("NaiveBayes without CV thresholds: ", str(nb.getThresholds()))
+
+    # Save model
+    nb.save(CWD + "/nb_model")
+
+    # NB without CV metrics
+    nb_metrics_rdd = MulticlassMetrics(predictions['label', 'prediction'].rdd)
+
+    # TODO: why recall, accuracy, f1 score, precision is the same?
+    logger.warn("Printing NB stats...")
+    print("Recall (NB without CV): ", str(nb_metrics_rdd.recall()))
+    print("Accuracy (NB without CV): ", str(nb_metrics_rdd.accuracy))
+    print("F1 score (NB without CV): ", str(nb_metrics_rdd.fMeasure()))
+    print("Precision (NB without CV): ", str(nb_metrics_rdd.precision()))
+    print("Confusion matrix (NB without CV): ", str(nb_metrics_rdd.confusionMatrix))
+
+    # Show some results of predictions on the test data set
     predictions.filter(predictions['prediction'] != predictions['label']) \
         .select("Product", "ConsumerComplaint", "probability", "label", "prediction") \
         .orderBy("probability", ascending=False) \
@@ -226,6 +248,7 @@ def main():
     # Evaluate best model without an use of Cross Validation
     accuracy_without_cv = evaluator.evaluate(predictions)
 
+    # TODO: why there is a significant difference between accuracy_without_cv (0.73) and nb_metrics_rdd.accuracy (0.75)
     print("Naive-Bayes accuracy without Cross Validation: " + str(accuracy_without_cv))
 
     logger.warn("Starting Cross Validation process...")
@@ -240,12 +263,14 @@ def main():
     # Instantiate the Evaluator of the model
     nb_evaluator = MulticlassClassificationEvaluator(labelCol='label', predictionCol='prediction')
 
-    # TODO: what's the 5-fold
     # Instantiate 5-fold CrossValidator
     nb_cv = CrossValidator(estimator=nb,
                            estimatorParamMaps=nbp_params_grid,
                            evaluator=nb_evaluator,
                            numFolds=5)
+
+    # Save the NB model with CV
+    nb_cv.save(CWD + "/nb_model_with_cv")
 
     # Create a model with Cross Validation
     nb_cv_model = nb_cv.fit(training_data)
@@ -256,39 +281,35 @@ def main():
     # Evaluate best model with an use of Cross Validation
     accuracy_with_cv = nb_evaluator.evaluate(cv_predictions)
 
-    print('Naive-Bayes accuracy with Cross Validation:', str(accuracy_with_cv))
+    print("Naive-Bayes accuracy with Cross Validation:", str(accuracy_with_cv))
 
-    print("Difference in accuracy between NBwithCV and NB: ", str(accuracy_with_cv - accuracy_without_cv))
+    print("Improvement for the best fitted model (NB with CV) in regard of NB: ", str(accuracy_with_cv - accuracy_without_cv))
 
     # TODO: want another metric?
-    metrics_rdd = MulticlassMetrics(cv_predictions['label', 'prediction'].rdd)
+    # NB with CV metrics
+    nb_with_cv_metrics_rdd = MulticlassMetrics(cv_predictions['label', 'prediction'].rdd)
 
-    print('Recall: ', str(metrics_rdd.recall()))
-    print('Accuracy: ', str(metrics_rdd.accuracy()))
-    print('F1 score: ', str(metrics_rdd.fMeasure()))
-    print('Precision: ', str(metrics_rdd.precision()))
-    print('Confusion matrix: ', str(metrics_rdd.confusionMatrix))
+    # TODO: why recall, accuracy, f1 score, precision is the same?
+    logger.warn("Printing NB with CV stats...")
+    print("Recall (NB with CV): ", str(nb_with_cv_metrics_rdd.recall()))
+    print("Accuracy (NB with CV): ", str(nb_with_cv_metrics_rdd.accuracy))
+    print("F1 score (NB with CV): ", str(nb_with_cv_metrics_rdd.fMeasure()))
+    print("Precision (NB with CV): ", str(nb_with_cv_metrics_rdd.precision()))
+    print("Confusion matrix (NB with CV): ", str(nb_with_cv_metrics_rdd.confusionMatrix))
 
     (cv_predictions.filter(cv_predictions['prediction'] != cv_predictions['label'])
      .select('Product', 'ConsumerComplaint', 'CompanyResponse', 'probability', 'label', 'prediction')
      .orderBy('probability', ascending=False)
      .show(n=10, truncate=20))
 
-    # Confusion Matrix or Cross Validation
-    """
-    paramGrid = ParamGridBuilder()\
-    .addGrid(hashingTF.numFeatures,[1000,10000,100000])\
-    .addGrid(idf.minDocFreq,[0,10,100])\
-    .build()
-    
-    cv = CrossValidator().setEstimator(pipeline).setEvaluator(evaluator).setEstimatorParamMaps(paramGrid).setNumFolds(2)
-    
-    cvModel = cv.fit(train_set)
+    # TODO: what's the ROC, UOC (?)
+    # TODO: can we print parameters for the best fitted model out?
+
+    # Confusion Matrix or Cross Validation ?
+    """    
     print "Area under the ROC curve for best fitted model =",evaluator.evaluate(cvModel.transform(test_set))
-    
     print "Area under ROC curve for non-tuned model:",evaluator.evaluate(predictions)
     print "Area under ROC curve for fitted model:",evaluator.evaluate(cvModel.transform(test_set))
-    print "Improvement:%.2f".format(evaluator.evaluate(cvModel.transform(test_set)) - evaluator.evaluate(predictions))*100 / evaluator.evaluate(predictions))
     """
 
     # Timestamp of end
