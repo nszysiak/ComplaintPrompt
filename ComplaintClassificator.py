@@ -87,6 +87,9 @@ def main():
                     .load(CONSUMER_COMPLAINTS)
                     .alias('complaint_df'))
 
+    logger.warn("Explaining complaint_df...")
+    complaint_df.explain()
+
     # Print statistics of a complaint_df DataFrame abstraction
     logger.warn("complaint_df has %d records, %d columns." % (complaint_df.count(), len(complaint_df.columns)))
     logger.warn("Printing schema of complaint_df: ")
@@ -104,6 +107,9 @@ def main():
                    .withColumn('CompanyResponse', udf_cleansed_field(complaint_df['CompanyResponseToConsument']))
                    .drop('CompanyResponseToConsument'))
 
+    logger.warn("Explaining cleansed_df...")
+    cleansed_df.explain()
+
     # Print statistics of a cleansed_init_df DataFrame abstraction
     logger.warn("cleansed_init_df has %d records, %d columns." % (cleansed_df.count(), len(cleansed_df.columns)))
     logger.warn("Printing schema of cleansed_df: ")
@@ -118,6 +124,9 @@ def main():
                                    'ConsumerComplaintNarrative', 'Issue', 'CompanyResponse')
                            .orderBy(cleansed_df['ReceivedDate']))
 
+    logger.warn("Explaining final_complaints_df...")
+    final_complaints_df.explain()
+
     # Print statistics of a final_complaints DataFrame abstraction
     logger.warn("final_complaints has %d records, %d columns." %
                 (final_complaints_df.count(), len(final_complaints_df.columns)))
@@ -131,6 +140,9 @@ def main():
     states_df = (spark_session.read
                  .json(AMERICAN_STATES, multiLine=True)
                  .alias('states_df'))
+
+    logger.warn("Explaining states_df...")
+    states_df.explain()
 
     # Print statistics of a states_df DataFrame abstraction
     logger.warn("states_df has %d records, %d columns." % (states_df.count(), len(states_df.columns)))
@@ -147,6 +159,9 @@ def main():
             .withColumn('RowNoIndex', monotonically_increasing_id())
             .select('Product', 'ConsumerComplaint', 'CompanyResponse')
             .drop(*drop_list))
+
+    logger.warn("Explaining joined_df...")
+    joined_df.explain()
 
     # Possible filtering on 'State' field for the states_df DataFrame abstraction
     # .where(states_df['name'].contains('California'))
@@ -168,6 +183,12 @@ def main():
                   .withColumn('Product', regexp_replace("Product", "Prepaid card", "Credit card or prepaid card"))
                   .withColumn('Product', regexp_replace("Product", "Credit card", "Credit card or prepaid card")))
 
+    # optionally write the file out in order to check data quality (repartition to 1)
+    # renamed_df.coalesce(1).write.csv('renamed_df.csv')
+
+    logger.warn("Explaining renamed_df...")
+    renamed_df.explain()
+
     # Check unique labels of Product attribute after replace
     renamed_df.select('Product').distinct().show()
 
@@ -182,8 +203,7 @@ def main():
     # Remove stop words
     remover = StopWordsRemover(inputCol='Words', outputCol='FilteredWords')
 
-    # TODO: optimize num_features amount while evaluating a ML model
-    num_features = 700
+    # num_features = 700
     hashing_tf = HashingTF(inputCol='FilteredWords', outputCol='RawFeatures')
 
     # minDocFreq: minimum number of documents in which a term should appear for filtering
@@ -210,7 +230,7 @@ def main():
     logger.warn("Starting Naive-Bayes...")
 
     # Naive-Bayes
-    nb = NaiveBayes(labelCol='label', featuresCol='features')
+    nb = NaiveBayes(labelCol='label', featuresCol='features', modelType='multinomial')
 
     # Create a model without Cross Validation
     nb_model = nb.fit(training_data)
@@ -220,21 +240,28 @@ def main():
 
     print("NaiveBayes without CV model type: ", nb.getModelType())
     print("NaiveBayes without CV smoothing factor: ", str(nb.getSmoothing()))
-    print("NaiveBayes without CV thresholds: ", str(nb.getThresholds()))
 
     # Save model
-    nb.save(CWD + "/nb_model")
+    # nb.save(CWD + "/nb_model")
 
     # NB without CV metrics
     nb_metrics_rdd = MulticlassMetrics(predictions['label', 'prediction'].rdd)
 
-    # TODO: why recall, accuracy, f1 score, precision is the same?
+    # NB stats by each class (label)
+    labels = predictions.rdd.map(lambda labels: labels.label).distinct().collect()
+
     logger.warn("Printing NB stats...")
-    print("Recall (NB without CV): ", str(nb_metrics_rdd.recall()))
-    print("Accuracy (NB without CV): ", str(nb_metrics_rdd.accuracy))
-    print("F1 score (NB without CV): ", str(nb_metrics_rdd.fMeasure()))
-    print("Precision (NB without CV): ", str(nb_metrics_rdd.precision()))
-    print("Confusion matrix (NB without CV): ", str(nb_metrics_rdd.confusionMatrix))
+    for label in sorted(labels):
+        print("Class %s precision = %s" % (label, nb_metrics_rdd.precision(label)))
+        print("Class %s recall = %s" % (label, nb_metrics_rdd.recall(label)))
+        print("Class %s F1 Measure = %s" % (label, nb_metrics_rdd.fMeasure(label, beta=1.0)))
+
+    # Weighted stats
+    print("Weighted recall = %s" % nb_metrics_rdd.weightedRecall)
+    print("Weighted precision = %s" % nb_metrics_rdd.weightedPrecision)
+    print("Weighted F(1) Score = %s" % nb_metrics_rdd.weightedFMeasure())
+    print("Weighted F(0.5) Score = %s" % nb_metrics_rdd.weightedFMeasure(beta=0.5))
+    print("Weighted false positive rate = %s" % nb_metrics_rdd.weightedFalsePositiveRate)
 
     # Show some results of predictions on the test data set
     predictions.filter(predictions['prediction'] != predictions['label']) \
@@ -255,9 +282,9 @@ def main():
 
     # Instantiate ParamGridBuilder for the Cross Validation purpose
     nbp_params_grid = (ParamGridBuilder()
-                       .addGrid(nb.smoothing, [0.4, 0.8, 1.0])
-                       .addGrid(hashing_tf.numFeatures, [700, 750])
-                       .addGrid(idf.minDocFreq, [1, 2, 3])
+                       .addGrid(nb.smoothing, [0.8, 0.9, 1.0])
+                       .addGrid(hashing_tf.numFeatures, [680, 700, 720])
+                       .addGrid(idf.minDocFreq, [3, 4, 5])
                        .build())
 
     # Instantiate the Evaluator of the model
@@ -270,7 +297,7 @@ def main():
                            numFolds=5)
 
     # Save the NB model with CV
-    nb_cv.save(CWD + "/nb_model_with_cv")
+    # nb_cv.save(CWD + "/nb_model_with_cv")
 
     # Create a model with Cross Validation
     nb_cv_model = nb_cv.fit(training_data)
@@ -289,13 +316,21 @@ def main():
     # NB with CV metrics
     nb_with_cv_metrics_rdd = MulticlassMetrics(cv_predictions['label', 'prediction'].rdd)
 
-    # TODO: why recall, accuracy, f1 score, precision is the same?
-    logger.warn("Printing NB with CV stats...")
-    print("Recall (NB with CV): ", str(nb_with_cv_metrics_rdd.recall()))
-    print("Accuracy (NB with CV): ", str(nb_with_cv_metrics_rdd.accuracy))
-    print("F1 score (NB with CV): ", str(nb_with_cv_metrics_rdd.fMeasure()))
-    print("Precision (NB with CV): ", str(nb_with_cv_metrics_rdd.precision()))
-    print("Confusion matrix (NB with CV): ", str(nb_with_cv_metrics_rdd.confusionMatrix))
+    # NB with CV stats by each class (label)
+    labels = cv_predictions.rdd.map(lambda att: att.label).distinct().collect()
+
+    logger.warn("Printing NB stats...")
+    for label in sorted(labels):
+        print("Class %s precision = %s" % (label, nb_with_cv_metrics_rdd.precision(label)))
+        print("Class %s recall = %s" % (label, nb_with_cv_metrics_rdd.recall(label)))
+        print("Class %s F1 Measure = %s" % (label, nb_with_cv_metrics_rdd.fMeasure(label, beta=1.0)))
+
+    # Weighted stats
+    print("Weighted recall = %s" % nb_with_cv_metrics_rdd.weightedRecall)
+    print("Weighted precision = %s" % nb_with_cv_metrics_rdd.weightedPrecision)
+    print("Weighted F(1) Score = %s" % nb_with_cv_metrics_rdd.weightedFMeasure())
+    print("Weighted F(0.5) Score = %s" % nb_with_cv_metrics_rdd.weightedFMeasure(beta=0.5))
+    print("Weighted false positive rate = %s" % nb_with_cv_metrics_rdd.weightedFalsePositiveRate)
 
     (cv_predictions.filter(cv_predictions['prediction'] != cv_predictions['label'])
      .select('Product', 'ConsumerComplaint', 'CompanyResponse', 'probability', 'label', 'prediction')
@@ -306,11 +341,6 @@ def main():
     # TODO: can we print parameters for the best fitted model out?
 
     # Confusion Matrix or Cross Validation ?
-    """    
-    print "Area under the ROC curve for best fitted model =",evaluator.evaluate(cvModel.transform(test_set))
-    print "Area under ROC curve for non-tuned model:",evaluator.evaluate(predictions)
-    print "Area under ROC curve for fitted model:",evaluator.evaluate(cvModel.transform(test_set))
-    """
 
     # Timestamp of end
     end_timestamp = dt.now()
