@@ -11,6 +11,8 @@ import os
 
 from pyspark.ml.tuning import ParamGridBuilder, CrossValidator
 from pyspark.mllib.evaluation import MulticlassMetrics
+from pyspark.context import SparkContext
+from py4j.protocol import Py4JJavaError
 from pyspark.sql import SparkSession
 from pyspark.sql.types import *
 from pyspark.conf import SparkConf
@@ -27,11 +29,27 @@ CWD = os.getcwd()
 
 
 def main():
-    # Instantiate SparkConf
-    spark_conf = SparkConf()
+    # Instantiate SparkConf and sent extraJavaOptions to both executor and drivers
+    spark_conf = (SparkConf().set('spark.executor.extraJavaOptions', '-Dcom.amazonaws.services.s3.enableV4=true')
+                  .set('spark.driver.extraJavaOptions', '-Dcom.amazonaws.services.s3.enableV4=true'))
 
-    # Build SparkSession with already instantiated SparkConf (spark_conf)
-    spark_session = (SparkSession.builder
+    # Instantiate SparkContext based on SparkConf
+    sc = SparkContext(conf=spark_conf)
+
+    # TODO below
+    sc.setSystemProperty('com.amazonaws.services.s3.enableV4', 'true')
+
+    # Create new Hadoop Configuration
+    hadoopConf = sc._jsc.hadoopConfiguration()
+
+    # Set Hadoop configuration K-V
+    hadoopConf.set('fs.s3a.awsAccessKeyId', 'XXXXX')
+    hadoopConf.set('fs.s3a.awsSecretAccessKey', 'XXXX')
+    hadoopConf.set('com.amazonaws.services.s3a.enableV4', 'true')
+    hadoopConf.set('fs.s3a.impl', 'org.apache.hadoop.fs.s3a.S3AFileSystem')
+
+    # Create SparkSession from SparkContext
+    spark_session = (SparkSession(sc).builder
                      .master("local[*]")
                      .appName('ComplaintClassificator')
                      .config(conf=spark_conf)
@@ -181,7 +199,8 @@ def main():
                   .withColumn('Product', regexp_replace("Product", "Payday loan", "Payday loan, title loan, or personal loan"))
                   .withColumn('Product', regexp_replace("Product", "Credit reporting", "Credit reporting, repair, or other"))
                   .withColumn('Product', regexp_replace("Product", "Prepaid card", "Credit card or prepaid card"))
-                  .withColumn('Product', regexp_replace("Product", "Credit card", "Credit card or prepaid card")))
+                  .withColumn('Product', regexp_replace("Product", "Credit card", "Credit card or prepaid card"))
+                  .limit(50))
 
     # optionally write the file out in order to check data quality (repartition to 1)
     # renamed_df.coalesce(1).write.csv('renamed_df.csv')
@@ -241,20 +260,22 @@ def main():
     print("NaiveBayes without CV model type: ", nb.getModelType())
     print("NaiveBayes without CV smoothing factor: ", str(nb.getSmoothing()))
 
-    # Save model
-    # nb.save(CWD + "/nb_model")
-
     # NB without CV metrics
     nb_metrics_rdd = MulticlassMetrics(predictions['label', 'prediction'].rdd)
 
     # NB stats by each class (label)
-    labels = predictions.rdd.map(lambda labels: labels.label).distinct().collect()
+    labels = predictions.rdd.map(lambda cols: cols.label).distinct().collect()
+
+    # TODO: ConfusionMatrix
 
     logger.warn("Printing NB stats...")
     for label in sorted(labels):
-        print("Class %s precision = %s" % (label, nb_metrics_rdd.precision(label)))
-        print("Class %s recall = %s" % (label, nb_metrics_rdd.recall(label)))
-        print("Class %s F1 Measure = %s" % (label, nb_metrics_rdd.fMeasure(label, beta=1.0)))
+        try:
+            print("Class %s precision = %s" % (label, nb_metrics_rdd.precision(label)))
+            print("Class %s recall = %s" % (label, nb_metrics_rdd.recall(label)))
+            print("Class %s F1 Measure = %s" % (label, nb_metrics_rdd.fMeasure(label, beta=1.0)))
+        except Py4JJavaError:
+            pass
 
     # Weighted stats
     print("Weighted recall = %s" % nb_metrics_rdd.weightedRecall)
@@ -275,7 +296,7 @@ def main():
     # Evaluate best model without an use of Cross Validation
     accuracy_without_cv = evaluator.evaluate(predictions)
 
-    # TODO: why there is a significant difference between accuracy_without_cv (0.73) and nb_metrics_rdd.accuracy (0.75)
+    print("Naive-Bayes accuracy without Cross Validation = %s (metric)" % str(nb_metrics_rdd.accuracy))
     print("Naive-Bayes accuracy without Cross Validation: " + str(accuracy_without_cv))
 
     logger.warn("Starting Cross Validation process...")
@@ -296,9 +317,6 @@ def main():
                            evaluator=nb_evaluator,
                            numFolds=5)
 
-    # Save the NB model with CV
-    # nb_cv.save(CWD + "/nb_model_with_cv")
-
     # Create a model with Cross Validation
     nb_cv_model = nb_cv.fit(training_data)
 
@@ -310,7 +328,8 @@ def main():
 
     print("Naive-Bayes accuracy with Cross Validation:", str(accuracy_with_cv))
 
-    print("Improvement for the best fitted model (NB with CV) in regard of NB: ", str(accuracy_with_cv - accuracy_without_cv))
+    print("Improvement for the best fitted model (NB with CV) in regard of NB: ",
+          str(accuracy_with_cv - accuracy_without_cv))
 
     # TODO: want another metric?
     # NB with CV metrics
@@ -321,9 +340,12 @@ def main():
 
     logger.warn("Printing NB stats...")
     for label in sorted(labels):
-        print("Class %s precision = %s" % (label, nb_with_cv_metrics_rdd.precision(label)))
-        print("Class %s recall = %s" % (label, nb_with_cv_metrics_rdd.recall(label)))
-        print("Class %s F1 Measure = %s" % (label, nb_with_cv_metrics_rdd.fMeasure(label, beta=1.0)))
+        try:
+            print("Class %s precision = %s" % (label, nb_with_cv_metrics_rdd.precision(label)))
+            print("Class %s recall = %s" % (label, nb_with_cv_metrics_rdd.recall(label)))
+            print("Class %s F1 Measure = %s" % (label, nb_with_cv_metrics_rdd.fMeasure(label, beta=1.0)))
+        except Py4JJavaError:
+            pass
 
     # Weighted stats
     print("Weighted recall = %s" % nb_with_cv_metrics_rdd.weightedRecall)
@@ -337,10 +359,7 @@ def main():
      .orderBy('probability', ascending=False)
      .show(n=10, truncate=20))
 
-    # TODO: what's the ROC, UOC (?)
     # TODO: can we print parameters for the best fitted model out?
-
-    # Confusion Matrix or Cross Validation ?
 
     # Timestamp of end
     end_timestamp = dt.now()
