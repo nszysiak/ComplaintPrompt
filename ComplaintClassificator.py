@@ -6,6 +6,7 @@
 # @Framework: Apache Spark 2.4.4
 
 from datetime import datetime as dt
+import sys
 import re
 import os
 
@@ -23,28 +24,46 @@ from pyspark.ml import Pipeline
 from pyspark.ml.classification import NaiveBayes, NaiveBayesModel, LogisticRegression
 from pyspark.ml.evaluation import MulticlassClassificationEvaluator
 
-CONSUMER_COMPLAINTS = "C:/Users/Norbert Szysiak/Desktop/Consumer_Complaints.csv"
-AMERICAN_STATES = "AmericanStatesAbb.json"
+CONSUMER_COMPLAINTS = sys.argv[1] # "C:/Users/Norbert Szysiak/Desktop/Consumer_Complaints.csv"
+AMERICAN_STATES = sys.argv[2] # "AmericanStatesAbb.json"
+AWS_ACCESS_KEY_ID = None
+try:
+    AWS_ACCESS_KEY_ID = sys.argv[3]
+except IndexError:
+    pass
+AWS_SECRET_ACCESS_KEY = None
+try:
+    AWS_SECRET_ACCESS_KEY = sys.argv[4]
+except IndexError:
+    pass
+
 CWD = os.getcwd()
 
 
 def main():
-    # Instantiate SparkConf and sent extraJavaOptions to both executor and drivers
+
+    print(CONSUMER_COMPLAINTS)
+    print(AMERICAN_STATES)
+    print(AWS_ACCESS_KEY_ID)
+    print(AWS_SECRET_ACCESS_KEY)
+    # Instantiate SparkConf and sent extraJavaOptions to both executors and drivers
     spark_conf = (SparkConf().set('spark.executor.extraJavaOptions', '-Dcom.amazonaws.services.s3.enableV4=true')
                   .set('spark.driver.extraJavaOptions', '-Dcom.amazonaws.services.s3.enableV4=true'))
 
     # Instantiate SparkContext based on SparkConf
     sc = SparkContext(conf=spark_conf)
 
-    # TODO below
+    # Set enableV4 property to access S3 input data
     sc.setSystemProperty('com.amazonaws.services.s3.enableV4', 'true')
 
     # Create new Hadoop Configuration
     hadoopConf = sc._jsc.hadoopConfiguration()
 
     # Set Hadoop configuration K-V
-    hadoopConf.set('fs.s3a.awsAccessKeyId', 'XXXXX')
-    hadoopConf.set('fs.s3a.awsSecretAccessKey', 'XXXX')
+    if is_not_blank(AWS_ACCESS_KEY_ID):
+        hadoopConf.set('fs.s3a.awsAccessKeyId', AWS_ACCESS_KEY_ID)
+    if is_not_blank(AWS_SECRET_ACCESS_KEY):
+        hadoopConf.set('fs.s3a.awsSecretAccessKey', AWS_SECRET_ACCESS_KEY)
     hadoopConf.set('com.amazonaws.services.s3a.enableV4', 'true')
     hadoopConf.set('fs.s3a.impl', 'org.apache.hadoop.fs.s3a.S3AFileSystem')
 
@@ -284,7 +303,7 @@ def main():
     print("Weighted F(0.5) Score = %s" % nb_metrics_rdd.weightedFMeasure(beta=0.5))
     print("Weighted false positive rate = %s" % nb_metrics_rdd.weightedFalsePositiveRate)
 
-    # Show some results of predictions on the test data set
+    # Show 10 results of predictions that haven't been predicted successfully
     predictions.filter(predictions['prediction'] != predictions['label']) \
         .select("Product", "ConsumerComplaint", "probability", "label", "prediction") \
         .orderBy("probability", ascending=False) \
@@ -304,7 +323,7 @@ def main():
     # Instantiate ParamGridBuilder for the Cross Validation purpose
     nbp_params_grid = (ParamGridBuilder()
                        .addGrid(nb.smoothing, [0.8, 0.9, 1.0])
-                       .addGrid(hashing_tf.numFeatures, [680, 700, 720])
+                       .addGrid(hashing_tf.numFeatures, [700, 720])
                        .addGrid(idf.minDocFreq, [3, 4, 5])
                        .build())
 
@@ -331,7 +350,6 @@ def main():
     print("Improvement for the best fitted model (NB with CV) in regard of NB: ",
           str(accuracy_with_cv - accuracy_without_cv))
 
-    # TODO: want another metric?
     # NB with CV metrics
     nb_with_cv_metrics_rdd = MulticlassMetrics(cv_predictions['label', 'prediction'].rdd)
 
@@ -347,19 +365,18 @@ def main():
         except Py4JJavaError:
             pass
 
-    # Weighted stats
+    # Print weighted stats
     print("Weighted recall = %s" % nb_with_cv_metrics_rdd.weightedRecall)
     print("Weighted precision = %s" % nb_with_cv_metrics_rdd.weightedPrecision)
     print("Weighted F(1) Score = %s" % nb_with_cv_metrics_rdd.weightedFMeasure())
     print("Weighted F(0.5) Score = %s" % nb_with_cv_metrics_rdd.weightedFMeasure(beta=0.5))
     print("Weighted false positive rate = %s" % nb_with_cv_metrics_rdd.weightedFalsePositiveRate)
 
+    # Show 10 results of cv_predictions that haven't been predicted successfully
     (cv_predictions.filter(cv_predictions['prediction'] != cv_predictions['label'])
      .select('Product', 'ConsumerComplaint', 'CompanyResponse', 'probability', 'label', 'prediction')
      .orderBy('probability', ascending=False)
      .show(n=10, truncate=20))
-
-    # TODO: can we print parameters for the best fitted model out?
 
     # Timestamp of end
     end_timestamp = dt.now()
@@ -370,6 +387,10 @@ def main():
     # Stop SparkSession
     spark_session.stop()
 
+def is_not_blank (_str):
+    if _str and _str.strip():
+        return True
+    return False
 
 def cleanse_field(field):
     pattern = r'[^A-Za-z0-9 ]+'
