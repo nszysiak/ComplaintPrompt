@@ -387,10 +387,12 @@ def main():
     # Stop SparkSession
     spark_session.stop()
 
+
 def is_not_blank (_str):
     if _str and _str.strip():
         return True
     return False
+
 
 def cleanse_field(field):
     pattern = r'[^A-Za-z0-9 ]+'
