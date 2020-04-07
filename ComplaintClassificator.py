@@ -6,46 +6,39 @@
 # @Framework: Apache Spark 2.4.4
 
 from datetime import datetime as dt
-import sys
 import re
-import os
+import sys
 
 from pyspark.ml.tuning import ParamGridBuilder, CrossValidator
 from pyspark.mllib.evaluation import MulticlassMetrics
 from pyspark.context import SparkContext
 from py4j.protocol import Py4JJavaError
-from pyspark.sql import SparkSession
+from pyspark.sql import SparkSession, SQLContext
 from pyspark.sql.types import *
 from pyspark.conf import SparkConf
 from pyspark.sql.functions import *
 from pyspark.sql.functions import udf
 from pyspark.ml.feature import HashingTF, IDF, Tokenizer, StopWordsRemover, StringIndexer
 from pyspark.ml import Pipeline
-from pyspark.ml.classification import NaiveBayes, NaiveBayesModel, LogisticRegression
+from pyspark.ml.classification import NaiveBayes, NaiveBayesModel
 from pyspark.ml.evaluation import MulticlassClassificationEvaluator
 
-CONSUMER_COMPLAINTS = sys.argv[1] # "C:/Users/Norbert Szysiak/Desktop/Consumer_Complaints.csv"
-AMERICAN_STATES = sys.argv[2] # "AmericanStatesAbb.json"
+CONSUMER_COMPLAINTS = sys.argv[1]  # "C:/Users/Norbert Szysiak/Desktop/Consumer_Complaints.csv"
+AMERICAN_STATES = sys.argv[2]  # "AmericanStatesAbb.json"
 AWS_ACCESS_KEY_ID = None
+AWS_SECRET_ACCESS_KEY = None
+
 try:
     AWS_ACCESS_KEY_ID = sys.argv[3]
 except IndexError:
     pass
-AWS_SECRET_ACCESS_KEY = None
 try:
     AWS_SECRET_ACCESS_KEY = sys.argv[4]
 except IndexError:
     pass
 
-CWD = os.getcwd()
-
 
 def main():
-
-    print(CONSUMER_COMPLAINTS)
-    print(AMERICAN_STATES)
-    print(AWS_ACCESS_KEY_ID)
-    print(AWS_SECRET_ACCESS_KEY)
     # Instantiate SparkConf and sent extraJavaOptions to both executors and drivers
     spark_conf = (SparkConf().set('spark.executor.extraJavaOptions', '-Dcom.amazonaws.services.s3.enableV4=true')
                   .set('spark.driver.extraJavaOptions', '-Dcom.amazonaws.services.s3.enableV4=true'))
@@ -77,8 +70,11 @@ def main():
     # Timestamp of start
     start_timestamp = dt.now()
 
-    # Define SparkContext
+    # Instantiate SparkContext
     sc = spark_session.sparkContext
+
+    # Instantiate SQLContext
+    sql_ctx = SQLContext(sc)
 
     # Set log level to 'WARN'
     sc.setLogLevel('WARN')
@@ -87,8 +83,8 @@ def main():
     log4j_logger = sc._jvm.org.apache.log4j
     logger = log4j_logger.LogManager.getLogger(__name__)
 
-    # Create custom schema as a StructType of StructField(s)
-    custom_schema = StructType([
+    # Create schema as a StructType of StructField(s)
+    schema = StructType([
         StructField('ReceivedDate', StringType(), True),
         StructField('Product', StringType(), True),
         StructField('Subproduct', StringType(), True),
@@ -120,14 +116,13 @@ def main():
                     .option('escape', '"')
                     .option('multiLine', 'true')
                     .option('inferSchema', 'false')
-                    .schema(custom_schema)
+                    .schema(schema)
                     .load(CONSUMER_COMPLAINTS)
                     .alias('complaint_df'))
 
     logger.warn("Explaining complaint_df...")
     complaint_df.explain()
 
-    # Print statistics of a complaint_df DataFrame abstraction
     logger.warn("complaint_df has %d records, %d columns." % (complaint_df.count(), len(complaint_df.columns)))
     logger.warn("Printing schema of complaint_df: ")
     complaint_df.printSchema()
@@ -140,38 +135,41 @@ def main():
 
     # Do some clean-up activities
     cleansed_df = (complaint_df.withColumn('Issue', udf_cleansed_field(complaint_df['ConsumerComplaintNarrative']))
-                   .withColumn('ReceivedDate', change_data_format(complaint_df['ReceivedDate']))
-                   .withColumn('CompanyResponse', udf_cleansed_field(complaint_df['CompanyResponseToConsument']))
-                   .drop('CompanyResponseToConsument'))
+                   .withColumn('ReceivedDate', change_data_format(complaint_df['ReceivedDate'])))
 
     logger.warn("Explaining cleansed_df...")
     cleansed_df.explain()
 
-    # Print statistics of a cleansed_init_df DataFrame abstraction
     logger.warn("cleansed_init_df has %d records, %d columns." % (cleansed_df.count(), len(cleansed_df.columns)))
     logger.warn("Printing schema of cleansed_df: ")
     cleansed_df.printSchema()
 
-    # Optionally apply filter on 'CompanyResponse' field to show only closed complaints
-    # filtered_response = cleansed_init_df.filter(cleansed_init_df['CompanyResponse'].rlike('close'))
-
     # Reduce a number of fields and filter non-null values out on consumer complaint narratives
     final_complaints_df = (cleansed_df.where(cleansed_df['ConsumerComplaintNarrative'].isNotNull())
                            .select('ComplaintId', 'ReceivedDate', 'State', 'Product',
-                                   'ConsumerComplaintNarrative', 'Issue', 'CompanyResponse')
+                                   'ConsumerComplaintNarrative', 'Issue')
                            .orderBy(cleansed_df['ReceivedDate']))
+
+    final_complaints_df.registerTempTable("final_complaints_df")
+
+    sql_ctx.sql(""" SELECT RowNum, ConsumerComplaintNarrative, Issue FROM
+                    (SELECT ROW_NUMBER() OVER (PARTITION BY State ORDER BY ReceivedDate DESC) AS RowNum,
+                        ConsumerComplaintNarrative,
+                        Issue,
+                        ReceivedDate,
+                        State
+                    FROM final_complaints_df) fc
+                    WHERE RowNum = floor(randn(null))
+                    LIMIT 10
+                    """).show()
 
     logger.warn("Explaining final_complaints_df...")
     final_complaints_df.explain()
 
-    # Print statistics of a final_complaints DataFrame abstraction
     logger.warn("final_complaints has %d records, %d columns." %
                 (final_complaints_df.count(), len(final_complaints_df.columns)))
     logger.warn("Printing schema of final_complaints_df: ")
     final_complaints_df.printSchema()
-
-    # Possible filtering on 'ReceivedDate' field for the filtered_response DataFrame abstraction
-    # .filter(year(filtered_response['ReceivedDate']).between(2013, 2015)) \
 
     # Read states json provider as a states_df DataFrame abstraction
     states_df = (spark_session.read
@@ -181,7 +179,6 @@ def main():
     logger.warn("Explaining states_df...")
     states_df.explain()
 
-    # Print statistics of a states_df DataFrame abstraction
     logger.warn("states_df has %d records, %d columns." % (states_df.count(), len(states_df.columns)))
     logger.warn("Printing schema of states_df: ")
     states_df.printSchema()
@@ -192,18 +189,26 @@ def main():
     # Join complaints data with American states, apply id field and drop unnecessary fields
     joined_df = (
         final_complaints_df.join(broadcast(states_df), col('complaint_df.State') == col('states_df.abbreviation'), "left")
-            .withColumnRenamed('ConsumerComplaintNarrative', 'ConsumerComplaint')
-            .withColumn('RowNoIndex', monotonically_increasing_id())
-            .select('Product', 'ConsumerComplaint', 'CompanyResponse')
-            .drop(*drop_list))
+        .withColumnRenamed('ConsumerComplaintNarrative', 'ConsumerComplaint')
+        .withColumn('RowNoIndex', monotonically_increasing_id())
+        .select('Product', 'ConsumerComplaint', 'name')
+        .drop(*drop_list))
+
+    joined_df.registerTempTable("joined_df")
+
+    sql_ctx.sql(""" SELECT RowNum, Product, ConsumerComplaint, FullStateName FROM
+                        (SELECT ROW_NUMBER() OVER (PARTITION BY Product ORDER BY ConsumerComplaint DESC) AS RowNum,
+                            Product,
+                            ConsumerComplaint,
+                            name AS FullStateName
+                        FROM joined_df) jd
+                        WHERE RowNum = floor(randn(null))
+                        LIMIT 10
+                        """).show()
 
     logger.warn("Explaining joined_df...")
     joined_df.explain()
 
-    # Possible filtering on 'State' field for the states_df DataFrame abstraction
-    # .where(states_df['name'].contains('California'))
-
-    # Print statistics of a joined_df DataFrame abstraction
     logger.warn("joined_df has %d records, %d columns." % (joined_df.count(), len(joined_df.columns)))
     logger.warn("Printing schema of joined_df: ")
     joined_df.printSchema()
@@ -218,11 +223,10 @@ def main():
                   .withColumn('Product', regexp_replace("Product", "Payday loan", "Payday loan, title loan, or personal loan"))
                   .withColumn('Product', regexp_replace("Product", "Credit reporting", "Credit reporting, repair, or other"))
                   .withColumn('Product', regexp_replace("Product", "Prepaid card", "Credit card or prepaid card"))
-                  .withColumn('Product', regexp_replace("Product", "Credit card", "Credit card or prepaid card"))
-                  .limit(50))
+                  .withColumn('Product', regexp_replace("Product", "Credit card", "Credit card or prepaid card")))
 
-    # optionally write the file out in order to check data quality (repartition to 1)
-    # renamed_df.coalesce(1).write.csv('renamed_df.csv')
+    renamed_df.registerTempTable("renamed_df")
+    sql_ctx.sql(""" SELECT DISTINCT Product FROM renamed_df """).show()
 
     logger.warn("Explaining renamed_df...")
     renamed_df.explain()
@@ -285,9 +289,8 @@ def main():
     # NB stats by each class (label)
     labels = predictions.rdd.map(lambda cols: cols.label).distinct().collect()
 
-    # TODO: ConfusionMatrix
-
     logger.warn("Printing NB stats...")
+
     for label in sorted(labels):
         try:
             print("Class %s precision = %s" % (label, nb_metrics_rdd.precision(label)))
@@ -318,7 +321,7 @@ def main():
     print("Naive-Bayes accuracy without Cross Validation = %s (metric)" % str(nb_metrics_rdd.accuracy))
     print("Naive-Bayes accuracy without Cross Validation: " + str(accuracy_without_cv))
 
-    logger.warn("Starting Cross Validation process...")
+    logger.warn("Starting Cross Validation...")
 
     # Instantiate ParamGridBuilder for the Cross Validation purpose
     nbp_params_grid = (ParamGridBuilder()
@@ -357,6 +360,7 @@ def main():
     labels = cv_predictions.rdd.map(lambda att: att.label).distinct().collect()
 
     logger.warn("Printing NB stats...")
+
     for label in sorted(labels):
         try:
             print("Class %s precision = %s" % (label, nb_with_cv_metrics_rdd.precision(label)))
@@ -374,7 +378,7 @@ def main():
 
     # Show 10 results of cv_predictions that haven't been predicted successfully
     (cv_predictions.filter(cv_predictions['prediction'] != cv_predictions['label'])
-     .select('Product', 'ConsumerComplaint', 'CompanyResponse', 'probability', 'label', 'prediction')
+     .select('Product', 'ConsumerComplaint', 'probability', 'label', 'prediction')
      .orderBy('probability', ascending=False)
      .show(n=10, truncate=20))
 
@@ -388,7 +392,7 @@ def main():
     spark_session.stop()
 
 
-def is_not_blank (_str):
+def is_not_blank(_str):
     if _str and _str.strip():
         return True
     return False
