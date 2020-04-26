@@ -38,10 +38,24 @@ except IndexError:
     pass
 
 
+def is_not_blank(_str):
+    if _str and _str.strip():
+        return True
+    return False
+
+
+def cleanse_field(field):
+    pattern = r'[^A-Za-z0-9 ]+'
+    if field is not None:
+        return re.sub(pattern, '', field.lower())
+    else:
+        return None
+
+
 def main():
     # Instantiate SparkConf and sent extraJavaOptions to both executors and drivers
     spark_conf = (SparkConf().set('spark.executor.extraJavaOptions', '-Dcom.amazonaws.services.s3.enableV4=true')
-                  .set('spark.driver.extraJavaOptions', '-Dcom.amazonaws.services.s3.enableV4=true'))
+                             .set('spark.driver.extraJavaOptions', '-Dcom.amazonaws.services.s3.enableV4=true'))
 
     # Instantiate SparkContext based on SparkConf
     sc = SparkContext(conf=spark_conf)
@@ -62,7 +76,6 @@ def main():
 
     # Create SparkSession from SparkContext
     spark_session = (SparkSession(sc).builder
-                     .master("local[*]")
                      .appName('ComplaintClassificator')
                      .config(conf=spark_conf)
                      .getOrCreate())
@@ -152,6 +165,7 @@ def main():
 
     final_complaints_df.registerTempTable("final_complaints_df")
 
+    # Check random ConsumerComplaintNarrative as well as Issue content
     sql_ctx.sql(""" SELECT RowNum, ConsumerComplaintNarrative, Issue FROM
                     (SELECT ROW_NUMBER() OVER (PARTITION BY State ORDER BY ReceivedDate DESC) AS RowNum,
                         ConsumerComplaintNarrative,
@@ -159,7 +173,7 @@ def main():
                         ReceivedDate,
                         State
                     FROM final_complaints_df) fc
-                    WHERE RowNum = floor(randn(null))
+                    WHERE RowNum = 1
                     LIMIT 10
                     """).show()
 
@@ -196,13 +210,14 @@ def main():
 
     joined_df.registerTempTable("joined_df")
 
+    # Check random FullStateName content
     sql_ctx.sql(""" SELECT RowNum, Product, ConsumerComplaint, FullStateName FROM
                         (SELECT ROW_NUMBER() OVER (PARTITION BY Product ORDER BY ConsumerComplaint DESC) AS RowNum,
                             Product,
                             ConsumerComplaint,
                             name AS FullStateName
                         FROM joined_df) jd
-                        WHERE RowNum = floor(randn(null))
+                        WHERE RowNum = 1
                         LIMIT 10
                         """).show()
 
@@ -226,7 +241,14 @@ def main():
                   .withColumn('Product', regexp_replace("Product", "Credit card", "Credit card or prepaid card")))
 
     renamed_df.registerTempTable("renamed_df")
+
+    # Check how many unique labels (classes) there are
     sql_ctx.sql(""" SELECT DISTINCT Product FROM renamed_df """).show()
+
+    # Check how many times each class occurs in the corpus
+    sql_ctx.sql(""" SELECT Product, count(*) 
+    FROM renamed_df GROUP BY Product 
+    ORDER BY count(*) DESC""").show(50, False)
 
     logger.warn("Explaining renamed_df...")
     renamed_df.explain()
@@ -312,6 +334,12 @@ def main():
         .orderBy("probability", ascending=False) \
         .show(n=10, truncate=20)
 
+    # Show 10 results of predictions that have been predicted successfully
+    predictions.filter(predictions['prediction'] == predictions['label']) \
+        .select("Product", "ConsumerComplaint", "probability", "label", "prediction") \
+        .orderBy("probability", ascending=False) \
+        .show(n=10, truncate=20)
+
     # Instantiate an evaluation of predictions without Cross Validation
     evaluator = MulticlassClassificationEvaluator(labelCol="label", predictionCol="prediction")
 
@@ -319,7 +347,6 @@ def main():
     accuracy_without_cv = evaluator.evaluate(predictions)
 
     print("Naive-Bayes accuracy without Cross Validation = %s (metric)" % str(nb_metrics_rdd.accuracy))
-    print("Naive-Bayes accuracy without Cross Validation: " + str(accuracy_without_cv))
 
     logger.warn("Starting Cross Validation...")
 
@@ -351,7 +378,7 @@ def main():
     print("Naive-Bayes accuracy with Cross Validation:", str(accuracy_with_cv))
 
     print("Improvement for the best fitted model (NB with CV) in regard of NB: ",
-          str(accuracy_with_cv - accuracy_without_cv))
+          str(accuracy_with_cv - nb_metrics_rdd.accuracy))
 
     # NB with CV metrics
     nb_with_cv_metrics_rdd = MulticlassMetrics(cv_predictions['label', 'prediction'].rdd)
@@ -376,6 +403,12 @@ def main():
     print("Weighted F(0.5) Score = %s" % nb_with_cv_metrics_rdd.weightedFMeasure(beta=0.5))
     print("Weighted false positive rate = %s" % nb_with_cv_metrics_rdd.weightedFalsePositiveRate)
 
+    # Show 10 results of cv_predictions that have been predicted successfully
+    (cv_predictions.filter(cv_predictions['prediction'] == cv_predictions['label'])
+     .select('Product', 'ConsumerComplaint', 'probability', 'label', 'prediction')
+     .orderBy('probability', ascending=False)
+     .show(n=10, truncate=20))
+
     # Show 10 results of cv_predictions that haven't been predicted successfully
     (cv_predictions.filter(cv_predictions['prediction'] != cv_predictions['label'])
      .select('Product', 'ConsumerComplaint', 'probability', 'label', 'prediction')
@@ -390,20 +423,6 @@ def main():
 
     # Stop SparkSession
     spark_session.stop()
-
-
-def is_not_blank(_str):
-    if _str and _str.strip():
-        return True
-    return False
-
-
-def cleanse_field(field):
-    pattern = r'[^A-Za-z0-9 ]+'
-    if field is not None:
-        return re.sub(pattern, '', field.lower())
-    else:
-        return None
 
 
 if __name__ == '__main__':
